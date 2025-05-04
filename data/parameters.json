@@ -1,0 +1,78 @@
+{
+  "Pnom": 5,
+  "PV": {
+    "Pmax": 5
+  },
+  "BESS": {
+    "SoC0": 0.5,
+    "Emax": 10,
+    "Pmax_c": 5,
+    "Pmax_d": 5,
+    "eff": 0.9
+  },
+  "Load": {
+    "Pmax": 5
+  },
+  "EVCS": [
+    "BOULDER / JUNCTION ST1"
+  ],
+  "timestep": 5,
+  "RL": {
+    "Penalty": 0.1,
+    "Bonus": 0.1,
+    "charge_bonus": 1.0,
+    "match_penalty": 1.0,
+    "bess_penalty": 0.3,
+    "misalignment_penalty": 0.5,
+    "shaping_coefficient": 1.0
+  },
+  "EDS": {
+    "Pmax": 5,
+    "Pmin": 5,
+    "cost_negative": 0.0,
+    "cost": {
+      "00:00": 0.4,
+      "01:00": 0.4,
+      "02:00": 0.4,
+      "03:00": 0.4,
+      "04:00": 0.4,
+      "05:00": 0.4,
+      "06:00": 0.4,
+      "07:00": 0.4,
+      "08:00": 0.4,
+      "09:00": 0.4,
+      "10:00": 0.4,
+      "11:00": 0.4,
+      "12:00": 0.4,
+      "13:00": 0.4,
+      "14:00": 0.4,
+      "15:00": 0.4,
+      "16:00": 0.4,
+      "17:00": 0.4,
+      "18:00": 0.7,
+      "19:00": 0.7,
+      "20:00": 0.7,
+      "21:00": 0.7,
+      "22:00": 0.4,
+      "23:00": 0.4
+    }
+  },
+  "MODEL": {
+    "MODEL_PATH": "data/", 
+    "MODEL_TYPE": "NHMHADDQN"
+  },
+  "ENV":{
+    "MODE": "train",
+    "randomize": "True",
+    "curriculum": "True",
+    "curriculum_steps": 10,
+    "curriculum_increment": 0.05,
+    "curriculum_max": 1.0,
+    "difficulty": 0.1,
+    "randomize_observations":{
+      "eds": "False",
+      "soc": "False",
+      "idx": "False"
+    }
+  }
+}
