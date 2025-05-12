@@ -18,13 +18,16 @@
   ],
   "timestep": 5,
   "RL": {
-    "Penalty": 0.1,
-    "Bonus": 0.1,
-    "charge_bonus": 1.0,
-    "match_penalty": 1.0,
-    "bess_penalty": 0.3,
-    "misalignment_penalty": 0.5,
-    "shaping_coefficient": 1.0
+    "Penalty": 0.0,
+    "Bonus": 0.0,
+    "charge_bonus": 0.0,
+    "match_penalty": 0.0,
+    "misalignment_penalty": 0.0,
+    "shaping_coefficient": 0.0,
+    "bess_penalty": 0.0,
+    "pv_gt_load_penalty": 0.0,
+    "discharge_tolerance": 0.0,
+    "discharge_reward": 0.0
   },
   "EDS": {
     "Pmax": 5,
@@ -69,6 +72,7 @@
     "curriculum_increment": 0.05,
     "curriculum_max": 1.0,
     "difficulty": 0.1,
+    "action_discretization": "static",
     "randomize_observations":{
       "eds": "False",
       "soc": "False",

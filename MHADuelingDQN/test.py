@@ -1,8 +1,7 @@
-# test_plot_mhaduelingdqn.py
-
 import json
 import sys
 import os
+from collections import deque
 
 # allow imports from project root
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -12,122 +11,123 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from env import EnergyEnv
-from MHADuelingDQN.model import MHADuelingDQN  # import dueling multi-head model
+from MHADuelingDQN.model import AttentionDuelingDQN  # import new MHA Dueling model
 
+# Utility to load JSON config
 def load_config(path: str) -> dict:
     with open(path, 'r') as f:
         return json.load(f)
 
-def run_episode(env, model, device):
-    obs = env.reset()
-    state = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
 
-    times    = []
-    p_bess   = []
-    p_grid   = []
-    p_pv     = []
-    p_load   = []
-    soc_list = []
+def run_episode(env: EnergyEnv,
+                model: torch.nn.Module,
+                device: torch.device):
+    """
+    Run one episode with the transformer-based Dueling DQN.
+    Returns time stamps, p_bess, p_grid, p_pv, p_load, soc over steps.
+    """
+    window_size = model.window_size
+    obs0 = env.reset()
+    history = deque([obs0] * window_size, maxlen=window_size)
+
+    times, p_bess_list, p_grid_list, p_pv_list, p_load_list, soc_list = (
+        [], [], [], [], [], []
+    )
 
     done = False
     while not done:
-        # reset noise for exploration
+        # build state tensor [1, L, obs_dim]
+        state_hist = np.stack(history, axis=0)[None]
+        state_tensor = torch.tensor(state_hist, dtype=torch.float32, device=device)
+
         model.reset_noise()
         with torch.no_grad():
-            q_vals = model(state)
+            q_vals = model(state_tensor)
             action = int(q_vals.argmax(dim=1).item())
 
-        obs, _, done, info = env.step(action)
-        state = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+        obs, reward, done, info = env.step(action)
+        history.append(obs)
 
-        t       = info['time']
-        pv_val   = env.pv_series.loc[t]   * env.PVmax
-        load_val = env.load_series.loc[t] * env.Loadmax
-
+        # record using info and original series
+        t = info.get('time')
         times.append(t)
-        p_bess.append(info['p_bess'])
-        p_grid.append(info['p_grid_power'])
-        p_pv.append(pv_val)
-        p_load.append(load_val)
+        p_bess_list.append(info.get('p_bess', np.nan))
+        p_grid_list.append(info.get('p_grid_power', np.nan))
+        # use env.pv_series and load_series from original env
+        p_pv_list.append(env.pv_series.loc[t] * env.PVmax)
+        p_load_list.append(env.load_series.loc[t] * env.Loadmax)
         soc_list.append(env.soc)
 
-    return times, p_bess, p_grid, p_pv, p_load, soc_list
+    return (
+        np.array(times),
+        np.array(p_bess_list),
+        np.array(p_grid_list),
+        np.array(p_pv_list),
+        np.array(p_load_list),
+        np.array(soc_list)
+    )
 
 
 def main(cfg_path: str, model_path: str):
     cfg = load_config(cfg_path)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # initialize environment
     env = EnergyEnv(
-        data_dir='data',
+        data_dir=cfg.get('data_dir', 'data'),
         start_idx=cfg['start_idx'],
         episode_length=cfg.get('test_episode_length', cfg['episode_length']),
+        test=True,
+        data='train',
         observations=cfg['observations'],
-        discrete_charge_bins=cfg['discrete_charge_bins'],
-        discrete_discharge_bins=cfg['discrete_discharge_bins'],
-        test=True
+        # discrete_charge_bins=cfg['discrete_charge_bins'],
+        # discrete_discharge_bins=cfg['discrete_discharge_bins'],
+        discrete_actions=cfg.get('discrete_actions', 501)
     )
-    state_dim  = env.observation_space.shape[0]
-    action_dim = env.action_space.n
 
-    # load dueling multi-head model
-    model = MHADuelingDQN(
-        num_features=state_dim,
-        action_dim=action_dim,
-        hidden_dim=cfg['hidden_dim'],
-        num_heads=cfg['num_heads'],
-        num_layers=cfg['num_layers'],
+    model = AttentionDuelingDQN(
+        obs_dim=env.observation_space.shape[0],
+        action_dim=env.action_space.n,
+        window_size=cfg.get('window_size', 16),
+        d_model=cfg.get('d_model', 128),
+        nhead=cfg.get('nhead', 4),
+        num_layers=cfg.get('num_layers', 2),
+        dim_feedforward=cfg.get('dim_feedforward', 256),
+        dropout=cfg.get('dropout', 0.1),
         sigma_init=cfg.get('sigma_init', 0.017)
     ).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
-    # run one test episode
     times, p_bess, p_grid, p_pv, p_load, soc = run_episode(env, model, device)
 
-    # limit to first 288 steps
-    N = 288
-    times    = times[:N]
-    p_bess   = p_bess[:N]
-    p_grid   = p_grid[:N]
-    p_pv     = p_pv[:N]
-    p_load   = p_load[:N]
-    soc      = soc[:N]
-
-    # save SoC values
-    np.save('soc_values.npy', np.array(soc))
-
-    # plotting
+    N = min(cfg.get('plot_steps', env.episode_length), len(p_bess))
     x = np.arange(N)
-    width = 0.15
-    labels = [t.strftime('%H:%M') for t in times]
-    tick_idx = x[::24]
+    labels = [t.strftime('%H:%M') for t in times[:N]]
+    tick_idx = x[::max(1, N//10)]
     tick_labels = [labels[i] for i in tick_idx]
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-
-    ax1.bar(x - 1.5*width, p_bess, width, label='BESS Power')
-    ax1.plot(x - 0.5*width, p_grid,   label='Grid Power',   linewidth=1.5)
-    ax1.plot(x + 0.5*width, p_pv,     label='PV Generation', linewidth=1.5)
-    ax1.plot(x + 1.5*width, p_load,   label='Load Demand',   linewidth=1.5)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    width = 0.2
+    ax1.bar(x - width, p_bess[:N], width, label='BESS')
+    ax1.plot(x,   p_grid[:N], label='Grid', linewidth=1.5)
+    ax1.plot(x,   p_pv[:N],   label='PV',   linewidth=1.5)
+    ax1.plot(x,   p_load[:N], label='Load', linewidth=1.5)
     ax1.set_ylabel('Power (kW)')
-    ax1.set_title('BESS, Grid, PV & Load (first 288 steps)')
-    ax1.legend(loc='upper right')
-    ax1.set_xticks(tick_idx)
-    ax1.set_xticklabels(tick_labels, rotation=45)
+    ax1.legend()
 
-    ax2.plot(x, soc, '-o', label='SoC', linewidth=1.5)
-    ax2.set_ylabel('State of Charge')
-    ax2.set_title('Battery SoC (first 288 steps)')
+    ax2.plot(x, soc[:N], '-o', label='SoC', linewidth=1.5)
+    ax2.set_ylabel('SoC')
     ax2.set_xticks(tick_idx)
     ax2.set_xticklabels(tick_labels, rotation=45)
-    ax2.legend(loc='upper right')
+    ax2.legend()
 
     plt.tight_layout()
-    plt.savefig('mh_duelingdqn_plot.png')
+    plt.savefig('mha_dueling_output.png')
     plt.show()
-    plt.close(fig)
+
 
 if __name__ == '__main__':
-    main(cfg_path='MHADuelingDQN/model.json', model_path='Models/MHADuelingDQN/attentiondqn_energy.pth')
+    main(
+        cfg_path=sys.argv[1] if len(sys.argv) > 1 else 'MHADuelingDQN/model.json',
+        model_path=sys.argv[2] if len(sys.argv) > 2 else 'Models/MHADuelingDQN/best.pt'
+    )

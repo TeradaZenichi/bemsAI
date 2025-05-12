@@ -13,12 +13,21 @@
   "learning_rate": 0.0001,
   "discrete_charge_bins": 10,
   "discrete_discharge_bins": 10,
+  "discrete_actions": 501,
+  "n_step": 5, 
   "observations": [
     "pv",
     "load",
     "soc",             
+    "charging_ratio",  
+    "discharging_ratio",
     "hour_sin", 
-    "hour_cos"
+    "hour_cos", 
+    "day_sin", 
+    "day_cos",  
+    "month_sin",
+    "month_cos",
+    "weekday"
   ],
   "model_save_name": "duelingdqn_energy.pth",
   "reward_json_name": "episode_rewards_duelingdqn.json",

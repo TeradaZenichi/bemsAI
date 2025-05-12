@@ -7,7 +7,6 @@ class NoisyLinear(nn.Module):
     """
     Linear layer with factorized Gaussian noise:
     y = (W + σ_W ⊙ ε_W) x + (b + σ_b ⊙ ε_b)
-    Applies noise only during training.
     """
     def __init__(self, in_features: int, out_features: int, sigma_init: float = 0.017):
         super().__init__()
@@ -26,11 +25,12 @@ class NoisyLinear(nn.Module):
         self.register_buffer('bias_epsilon',   torch.empty(out_features))
 
         self.reset_parameters()
+        self.reset_noise()
 
     def reset_parameters(self):
         mu_range = 1.0 / math.sqrt(self.in_features)
-        nn.init.uniform_(self.weight_mu, -mu_range, mu_range)
-        nn.init.uniform_(self.bias_mu,   -mu_range, mu_range)
+        self.weight_mu.data.uniform_(-mu_range, mu_range)
+        self.bias_mu.data.uniform_(-mu_range, mu_range)
         self.weight_sigma.data.fill_(self.sigma_init)
         self.bias_sigma.data.fill_(self.sigma_init)
 
@@ -46,13 +46,8 @@ class NoisyLinear(nn.Module):
         self.bias_epsilon.copy_(eps_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Resample noise each forward in training
-        if self.training:
-            self.reset_noise()
-            weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
-            bias   = self.bias_mu   + self.bias_sigma   * self.bias_epsilon
-        else:
-            weight, bias = self.weight_mu, self.bias_mu
+        weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
+        bias   = self.bias_mu   + self.bias_sigma   * self.bias_epsilon
         return F.linear(x, weight, bias)
 
 
@@ -75,7 +70,7 @@ class PositionalEncoding(nn.Module):
 
 class AttentionDuelingDQN(nn.Module):
     """
-    Transformer-based Dueling DQN with NoisyLinear, LayerNorm, and dropout.
+    Transformer-based Dueling DQN with NoisyLinear and batch-first attention.
     """
     def __init__(
         self,
@@ -92,14 +87,11 @@ class AttentionDuelingDQN(nn.Module):
         super().__init__()
         self.window_size = window_size
 
-        # Input projection and normalization
+        # Input projection
         self.input_proj = NoisyLinear(obs_dim, d_model, sigma_init)
-        self.input_norm = nn.LayerNorm(d_model)
-
         # Positional encoding
-        self.pos_enc = PositionalEncoding(d_model, max_len=window_size)
-
-        # Transformer encoder
+        self.pos_enc     = PositionalEncoding(d_model, max_len=window_size)
+        # Transformer encoder with batch_first for NestedTensor
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -110,17 +102,15 @@ class AttentionDuelingDQN(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
 
-        # Dueling streams with dropout
+        # Dueling streams
         self.value_stream = nn.Sequential(
             NoisyLinear(d_model, d_model, sigma_init),
             nn.ReLU(),
-            nn.Dropout(dropout),
             NoisyLinear(d_model, 1, sigma_init)
         )
         self.adv_stream = nn.Sequential(
             NoisyLinear(d_model, d_model, sigma_init),
             nn.ReLU(),
-            nn.Dropout(dropout),
             NoisyLinear(d_model, action_dim, sigma_init)
         )
 
@@ -136,29 +126,18 @@ class AttentionDuelingDQN(nn.Module):
         returns Q-values: [B, action_dim]
         """
         B, L, _ = obs_window.shape
-
-        # Reset noise for this forward
-        self.reset_noise()
-
-        # 1. Project and normalize input
-        x = obs_window.view(-1, obs_window.size(-1))
-        x = self.input_proj(x)
-        x = self.input_norm(x)
-        x = x.view(B, L, -1)  # [B, L, d_model]
-
+        # 1. Project input
+        x = self.input_proj(obs_window.view(-1, obs_window.size(-1)))
+        x = x.view(B, L, -1)                # [B, L, d_model]
         # 2. Add positional encoding
         x = self.pos_enc(x)
-
         # 3. Transformer encode
-        h = self.transformer(x)  # [B, L, d_model]
-
-        # 4. Mean pooling over sequence
-        h_pool = h.mean(dim=1)  # [B, d_model]
-
+        h = self.transformer(x)             # [B, L, d_model]
+        # 4. Take last timestep
+        h_last = h[:, -1, :]                # [B, d_model]
         # 5. Dueling streams
-        v = self.value_stream(h_pool)  # [B, 1]
-        a = self.adv_stream(h_pool)    # [B, action_dim]
-
-        # 6. Combine value and advantage
+        v = self.value_stream(h_last)       # [B,1]
+        a = self.adv_stream(h_last)         # [B,action_dim]
+        # 6. Combine
         q = v + (a - a.mean(dim=1, keepdim=True))
         return q
