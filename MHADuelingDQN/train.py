@@ -276,11 +276,11 @@ def train(cfg_path: str):
             # salva episódio
             torch.save(model.state_dict(),
                        os.path.join(model_dir, f"ep{ep}.pt"))
-            # salva best se for melhor
-            if total_r > best_reward:
-                best_reward = total_r
-                torch.save(model.state_dict(),
-                           os.path.join(model_dir, "best.pt"))
+        # salva best se for melhor
+        if total_r > best_reward:
+            best_reward = total_r
+            torch.save(model.state_dict(),
+                        os.path.join(model_dir, "best.pt"))
 
         pbar.set_postfix({'Reward':f'{total_r:.2f}',
                           'Cost':f'{total_cost:.2f}',

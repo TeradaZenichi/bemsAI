@@ -62,7 +62,7 @@
   },
   "MODEL": {
     "MODEL_PATH": "data/", 
-    "MODEL_TYPE": "NHMHADDQN"
+    "MODEL_TYPE": "RL_CCPPO_GAE"
   },
   "ENV":{
     "MODE": "train",

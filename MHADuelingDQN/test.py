@@ -52,7 +52,7 @@ def run_episode(env: EnergyEnv,
         t = info.get('time')
         times.append(t)
         p_bess_list.append(info.get('p_bess', np.nan))
-        p_grid_list.append(info.get('p_grid_power', np.nan))
+        p_grid_list.append(info.get('p_grid', np.nan))
         # use env.pv_series and load_series from original env
         p_pv_list.append(env.pv_series.loc[t] * env.PVmax)
         p_load_list.append(env.load_series.loc[t] * env.Loadmax)
@@ -76,8 +76,7 @@ def main(cfg_path: str, model_path: str):
         data_dir=cfg.get('data_dir', 'data'),
         start_idx=cfg['start_idx'],
         episode_length=cfg.get('test_episode_length', cfg['episode_length']),
-        test=True,
-        data='train',
+        test=False,
         observations=cfg['observations'],
         # discrete_charge_bins=cfg['discrete_charge_bins'],
         # discrete_discharge_bins=cfg['discrete_discharge_bins'],
@@ -129,5 +128,5 @@ def main(cfg_path: str, model_path: str):
 if __name__ == '__main__':
     main(
         cfg_path=sys.argv[1] if len(sys.argv) > 1 else 'MHADuelingDQN/model.json',
-        model_path=sys.argv[2] if len(sys.argv) > 2 else 'Models/MHADuelingDQN/best.pt'
+        model_path=sys.argv[2] if len(sys.argv) > 2 else 'Models/MHADuelingDQN/ep270.pt'
     )
