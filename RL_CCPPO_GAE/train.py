@@ -200,14 +200,15 @@ class PPOTrainer:
 
             # --- update do pbar e logs ---
             pbar.set_postfix({
-                't_r':    f'{total_r:.3f}',
-                't_c':    f'{total_c:.3f}',
-                'e_r':     f'{val_r:.3f}',
-                'e_c':     f'{val_c:.3f}',
-                'start_idx':  f'{self.env.start_idx}',
+                't_r':        f'{total_r:.3f}',
+                # 't_c':    f'{total_c:.3f}',
+                'e_r':        f'{val_r:.3f}',
+                # 'e_c':     f'{val_c:.3f}',
+                'idx0':       f'{self.env.start_idx}',
                 'SoC0':       f'{self.env.initial_soc:.2f}',
-                'Pmax':       f'{self.env.Pmax_c:.2f}',
-                'Pmin':       f'{self.env.Pmax_d:.2f}'
+                'Pmax':       f'{self.env.PEDS_max:.2f}',
+                'Pmin':       f'{self.env.PEDS_min:.2f}',
+                'dif':        f'{self.env.difficulty:.2f}',
             })
             with open(self.log_train, 'a') as f:
                 f.write(f"{update},{total_r:.6f},{total_c:.6f}\n")

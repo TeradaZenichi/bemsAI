@@ -96,8 +96,8 @@ class EnergyEnvContinuous(gym.Env):
 
         # --- Observation space ---
         default_keys = [
-            'pv','load','pmax','pmin','soc',
-            'pv_excess','pv_charge',
+            'pv','load','pmax','pmin','soc', 'tariff',
+            'peds_max','peds_min','pv_excess','pv_charge',
             'hour_sin','hour_cos','day_sin','day_cos',
             'month_sin','month_cos','weekday'
         ]
@@ -120,8 +120,7 @@ class EnergyEnvContinuous(gym.Env):
         if not self.test_mode and self.randomize and self.randomize_idx:
             lim = int((0.2 + 0.6*self.difficulty) * 0.1 * len(self.pv_series))
             self.start_idx = np.random.randint(0, max(1, lim - self.episode_length))
-        
-
+         
         self.current_idx = self.start_idx
         self.end_idx     = self.start_idx + self.episode_length
 
@@ -129,9 +128,9 @@ class EnergyEnvContinuous(gym.Env):
         if not self.test_mode and self.randomize and self.randomize_soc:
             rng = 0.05 + self.difficulty * 0.95
             low, high = max(0, 0.5-rng/2), min(1, 0.5+rng/2)
-            self.soc = np.random.uniform(low, high)
-        else:
-            self.soc = self.initial_soc
+            self.initial_soc = np.random.uniform(low, high)
+        
+        self.soc = self.initial_soc
 
         # Randomize EDS limits if configured
         if not self.test_mode and self.randomize and self.randomize_eds:
@@ -159,6 +158,9 @@ class EnergyEnvContinuous(gym.Env):
         obs.update({
             'pv':        p_pv/self.nom,
             'load':      p_load/self.nom,
+            'tariff':    self.cost_dict[f"{t.hour:02d}:00"],
+            'peds_max':  self.PEDS_max/self.nom,
+            'peds_min':  self.PEDS_min/self.nom,
             'pmax':      max_c/self.nom,
             'pmin':      max_d/self.nom,
             'soc':       self.soc,

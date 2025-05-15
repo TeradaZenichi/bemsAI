@@ -5,9 +5,9 @@
   },
   "BESS": {
     "SoC0": 0.5,
-    "Emax": 10,
-    "Pmax_c": 5,
-    "Pmax_d": 5,
+    "Emax": 5,
+    "Pmax_c": 3,
+    "Pmax_d": 3,
     "eff": 0.9
   },
   "Load": {
@@ -69,13 +69,13 @@
     "randomize": "True",
     "curriculum": "True",
     "curriculum_steps": 10,
-    "curriculum_increment": 0.05,
+    "curriculum_increment": 0.018,
     "curriculum_max": 1.0,
     "difficulty": 0.1,
     "action_discretization": "static",
     "randomize_observations":{
       "eds": "False",
-      "soc": "False",
+      "soc": "True",
       "idx": "False"
     }
   }

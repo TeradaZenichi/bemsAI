@@ -1,13 +1,13 @@
 {
   "seed": 42,
   "start_idx": 0,
-  "episode_length": 288,
+  "episode_length": 576,
   "rollout_length": 576,
   "max_updates": 1000,
   "checkpoint_freq": 50,
   "observations": [
-    "pv", "load", "soc",
-    "pmax", "pmin",
+    "pv", "load", "soc", "tariff",
+    "peds_max","peds_min","pmax", "pmin",
     "hour_sin", "hour_cos",
     "day_sin", "day_cos",
     "month_sin", "month_cos",

@@ -1,1 +1,0 @@
-update,reward_total,energy_cost_total
