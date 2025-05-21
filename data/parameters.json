@@ -4,7 +4,7 @@
     "Pmax": 5
   },
   "BESS": {
-    "SoC0": 0.5,
+    "SoC0": 0.0,
     "Emax": 5,
     "Pmax_c": 3,
     "Pmax_d": 3,
@@ -69,7 +69,7 @@
     "randomize": "True",
     "curriculum": "True",
     "curriculum_steps": 10,
-    "curriculum_increment": 0.018,
+    "curriculum_increment": 0.003,
     "curriculum_max": 1.0,
     "difficulty": 0.1,
     "action_discretization": "static",

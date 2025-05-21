@@ -26,6 +26,13 @@
     "ppo_epochs": 10,
     "mini_batch_size": 64
   },
+  "incremental_training": {
+    "window_size": 3,
+    "base_updates": 100,
+    "max_updates": 2000,
+    "alpha": 50,
+    "patience": 30
+  },
   "log_dir": "logs",
   "model_dir": "models/ppo"
 }

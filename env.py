@@ -113,8 +113,9 @@ class EnergyEnvContinuous(gym.Env):
         # Update curriculum difficulty
         if not self.test_mode and self.curriculum:
             self.episode_counter += 1
-            if self.episode_counter % self.curriculum_steps == 0:
+            if self.episode_counter == self.curriculum_steps:
                 self.difficulty = min(self.difficulty + self.curriculum_inc, self.curriculum_max)
+                self.episode_counter = 0
 
         # Randomize start index if configured
         if not self.test_mode and self.randomize and self.randomize_idx:

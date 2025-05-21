@@ -76,7 +76,7 @@ def main(params_path, model_cfg_path, model_weights_path):
         episode_length = model_cfg.get('test_episode_length',
                                        model_cfg.get('episode_length', 2*288)),
         observations= model_cfg['observations'],
-        mode        = 'eval'
+        mode        = 'test'
     )
 
     # Sobrescreve PVmax e Loadmax se quiser usar Pnom para normalização
