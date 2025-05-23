@@ -4,11 +4,13 @@
     "Pmax": 5
   },
   "BESS": {
-    "SoC0": 0.0,
+    "SoC0": 0.5,
     "Emax": 5,
     "Pmax_c": 3,
     "Pmax_d": 3,
-    "eff": 0.9
+    "eff": 0.9,
+    "soc_min": 0.2,
+    "soc_max": 1.0
   },
   "Load": {
     "Pmax": 5

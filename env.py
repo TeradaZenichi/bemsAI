@@ -109,7 +109,8 @@ class EnergyEnvContinuous(gym.Env):
             dtype=np.float32
         )
 
-    def reset(self):
+
+    def reset(self, initial_soc=None):
         # Update curriculum difficulty
         if not self.test_mode and self.curriculum:
             self.episode_counter += 1
@@ -125,12 +126,17 @@ class EnergyEnvContinuous(gym.Env):
         self.current_idx = self.start_idx
         self.end_idx     = self.start_idx + self.episode_length
 
-        # Randomize SOC if configured
-        if not self.test_mode and self.randomize and self.randomize_soc:
+        # ----------- Alteração 1 e 3: randomizar e/ou setar SoC inicial ----------- #
+        if initial_soc is not None:
+            # Usuário define o SoC inicial explicitamente
+            self.initial_soc = float(np.clip(initial_soc, 0.0, 1.0))
+        elif ((not self.test_mode or self.eval_mode) and self.randomize and self.randomize_soc):
+            # Randomize SoC inicial mesmo em modo eval!
             rng = 0.05 + self.difficulty * 0.95
-            low, high = max(0, 0.5-rng/2), min(1, 0.5+rng/2)
+            low, high = max(0, 0.5 - rng/2), min(1, 0.5 + rng/2)
             self.initial_soc = np.random.uniform(low, high)
-        
+        # ------------------------------------------------------------------------ #
+
         self.soc = self.initial_soc
 
         # Randomize EDS limits if configured
