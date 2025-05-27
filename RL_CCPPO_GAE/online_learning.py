@@ -1,72 +1,76 @@
 import os
-import torch
-import json
 import sys
-from RL_CCPPO_GAE.model import ConstrainedPPOAgent
-from RL_CCPPO_GAE.train import HyperParameters, PPOTrainer
+import json
+import torch
+import numpy as np
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+# Permitir imports do diretório raiz do projeto
+target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(target_path)
+
 from env import EnergyEnvContinuous
+from RL_CCPPO_GAE.model import PPOAgent
+from RL_CCPPO_GAE.train import HyperParameters, PPOTrainer
 
-# Permitir imports do diretório raiz
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# Utilitário para salvar e carregar checkpoints de forma incremental
-def save_checkpoint(trainer, day_idx, save_dir, extra_info=None):
+def save_checkpoint(trainer, train_days, save_dir, extra_info=None):
     os.makedirs(save_dir, exist_ok=True)
-    path = os.path.join(save_dir, f"best_model_day{day_idx}.pt")
-    torch.save({
-        'model_state_dict': trainer.best_state,
-        'train_days': trainer.train_days,
-        'val_days': trainer.val_days,
-        'num_rollouts': trainer.num_rollouts,
-        'extra_info': extra_info
-    }, path)
-    print(f"Checkpoint saved: {path}")
+    first_day = train_days[0]
+    ckpt_path = os.path.join(save_dir, f"ppo_best_model_day{first_day}.pt")
+    torch.save(trainer.best_state, ckpt_path)
+    print(f"Checkpoint saved: {ckpt_path}")
 
-def load_checkpoint(trainer, day_idx, save_dir):
-    path = os.path.join(save_dir, f"best_model_day{day_idx}.pt")
-    if os.path.exists(path):
-        ckpt = torch.load(path)
-        trainer.agent.load_state_dict(ckpt['model_state_dict'])
-        print(f"Loaded checkpoint from {path}")
-        return ckpt
-    else:
-        print(f"No checkpoint found for day {day_idx}. Starting fresh.")
-        return None
+    # Salva métricas também
+    if extra_info is not None:
+        metrics_path = os.path.join(save_dir, f"ppo_metrics_day{first_day}.json")
+        with open(metrics_path, 'w') as f:
+            json.dump(extra_info, f, indent=2)
+        print(f"Metrics saved: {metrics_path}")
 
-# Carregar configs de online learning, modelos e parâmetros do ambiente
 def load_configs(params_path, model_path, online_path):
     with open(params_path, 'r') as f:
         params = json.load(f)
     with open(model_path, 'r') as f:
-        model = json.load(f)
+        model_cfg = json.load(f)
     with open(online_path, 'r') as f:
         online = json.load(f)
-    return params, model, online
+    return params, model_cfg, online
+
+def generate_train_val_windows(total_days, train_window, val_window):
+    """
+    Gera listas de índices para train_days e val_days de acordo com os parâmetros.
+    """
+    train_days_list = []
+    val_days_list = []
+    for i in range(0, total_days - train_window - val_window + 2):  # +2 para incluir último grupo se encaixar
+        train_days = list(range(i+1, i+1+train_window))
+        val_days = list(range(i+1+train_window, i+1+train_window+val_window))
+        # Só inclui se ambos cabem no total de dias
+        if train_days[-1] <= total_days and val_days[-1] <= total_days:
+            train_days_list.append(train_days)
+            val_days_list.append(val_days)
+    return train_days_list, val_days_list
 
 def main():
     params_path = 'data/parameters.json'
     model_path = 'RL_CCPPO_GAE/model.json'
-    online_path = 'online_learning.json'
+    online_path = 'RL_CCPPO_GAE/online_learning.json'
+    save_dir = "models/online/ppo"
 
-    save_dir = "models/ppo_online"
     params, model_cfg, online_cfg = load_configs(params_path, model_path, online_path)
 
-    # Parse online learning parameters
-    days = online_cfg["days"]             # Example: [1,2,3,4,5,6,7,8]
-    train_window = online_cfg["train_window"]   # Example: 3
-    val_offset = online_cfg.get("val_offset", 1)  # How many days after train window to validate
-    num_rollouts = online_cfg.get("num_rollouts", 500)
-    resume_from = online_cfg.get("resume_from", None)  # e.g., 5 to resume from day 5
+    total_days = online_cfg["total_days"]
+    train_window = online_cfg["train_window"]
+    val_window = online_cfg["val_window"]
+    num_rollouts = online_cfg.get("num_rollouts", 1000)
+    resume_from = online_cfg.get("resume_from", None)  # pode ser None ou int
 
-    # Loop over online learning sessions
-    for i in range(0, len(days) - train_window - val_offset + 1):
-        # Determine which days to use for training and validation
-        train_days = days[i:i+train_window]
-        val_days = [days[i+train_window+val_offset-1]]
+    train_days_list, val_days_list = generate_train_val_windows(total_days, train_window, val_window)
 
-        print(f"\n=== Online Learning Step: Training on days {train_days} | Validating on days {val_days} ===")
+    for i, (train_days, val_days) in enumerate(zip(train_days_list, val_days_list)):
+        print(f"\n=== Online Learning Step {i+1}: Training on {train_days} | Validating on {val_days} ===")
 
-        # Build hyperparameters and PPO trainer for this window
         hp = HyperParameters(params_path, model_path)
         trainer = PPOTrainer(
             hp,
@@ -75,26 +79,29 @@ def main():
             num_rollouts=num_rollouts
         )
 
-        # Load previous best model if resuming
-        start_day = train_days[0]
-        if resume_from is not None and start_day < resume_from:
-            print(f"Skipping step for train_days starting at {start_day} (already completed).")
+        # Resume se configurado
+        first_day = train_days[0]
+        if resume_from is not None and first_day < resume_from:
+            print(f"Skipping step for train_days starting at {first_day} (already completed).")
             continue
-        elif start_day > days[0]:  # Not first window: try to load last best checkpoint
-            prev_idx = train_days[0] - 1
-            prev_ckpt = load_checkpoint(trainer, prev_idx, save_dir)
-            if prev_ckpt is not None:
-                trainer.agent.load_state_dict(prev_ckpt['model_state_dict'])
+        elif resume_from is not None and first_day > 1:
+            # Tentativa de carregar último checkpoint anterior, se existir
+            prev_day = first_day - 1
+            prev_ckpt = os.path.join(save_dir, f"ppo_best_model_day{prev_day}.pt")
+            if os.path.exists(prev_ckpt):
+                print(f"Loading weights from {prev_ckpt}")
+                trainer.agent.load_state_dict(torch.load(prev_ckpt))
 
-        # Train and validate
-        t_r, t_ec, v_r, v_ec = trainer.train_and_validate()
+        t_r, v_r = trainer.train_and_validate()
 
-        # Save current best model for this day
-        save_checkpoint(trainer, train_days[-1], save_dir, extra_info={
+        # Salva checkpoint e métricas
+        extra_info = {
             "train_days": train_days,
             "val_days": val_days,
-            "t_r": t_r, "t_ec": t_ec, "v_r": v_r, "v_ec": v_ec
-        })
+            "t_r": t_r,
+            "v_r": v_r
+        }
+        save_checkpoint(trainer, train_days, save_dir, extra_info)
 
 if __name__ == "__main__":
     main()

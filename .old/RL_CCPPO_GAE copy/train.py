@@ -5,15 +5,13 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Normal
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-import numpy as np
 
 # --- Allow root imports (adjust if needed) ---
 target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(target_path)
 
 from env import EnergyEnvContinuous
-from RL_CCPPO_GAE.model import PPOAgent  # Use o modelo sem constraints aqui!
+from RL_CCPPO_GAE.model import ConstrainedPPOAgent
 
 class HyperParameters:
     def __init__(self, param_path: str, model_path: str):
@@ -30,7 +28,7 @@ class HyperParameters:
         self.seed            = model_cfg.get('seed', 42)
         self.max_updates     = model_cfg.get('max_updates', 1000)
         self.checkpoint_freq = model_cfg.get('checkpoint_freq', 50)
-        self.rollout_length  = agent_cfg.get('rollout_length', 2048)
+        self.rollout_length  = agent_cfg.get('rollout_length', 2048)  # buffer size (hybrid PPO)
 
         # PPO
         self.gamma           = agent_cfg.get('gamma', 0.99)
@@ -38,7 +36,9 @@ class HyperParameters:
         self.clip_epsilon    = agent_cfg.get('clip_epsilon', 0.2)
         self.actor_lr        = agent_cfg.get('actor_lr', 3e-4)
         self.critic_lr       = agent_cfg.get('critic_lr', 1e-3)
+        self.cost_critic_lr  = agent_cfg.get('cost_critic_lr', 1e-3)
         self.entropy_coef    = agent_cfg.get('entropy_coef', 0.01)
+        self.lagrange_lambda = agent_cfg.get('lagrange_lambda', 1.0)
         self.ppo_epochs      = agent_cfg.get('ppo_epochs', 10)
         self.minibatch_size  = agent_cfg.get('mini_batch_size', 64)
 
@@ -48,11 +48,16 @@ class HyperParameters:
         self.p_max           = params['BESS']['Pmax_c']
         self.p_min           = -params['BESS']['Pmax_d']
         self.start_idx       = model_cfg.get('start_idx', 0)
-        self.timestep        = params.get('timestep', 5)
+        self.timestep        = params.get('timestep', 5)   # minutes per step
         self.train_dataset   = params.get('train_dataset', 'train')
         self.eval_dataset    = params.get('eval_dataset', 'train')
-        self.train_mode      = params.get('train_mode', 'train')
-        self.eval_mode       = params.get('eval_mode', 'test')
+        self.train_mode     = params.get('train_mode', 'train')
+        self.eval_mode      = params.get('eval_mode', 'test')
+
+        # Agent parameters
+        self.soc_min = params['BESS'].get('soc_min', 0.10)  # default 0.05 if not set
+        self.soc_max = params['BESS'].get('soc_max', 0.90)  # default 0.95 if not set
+        self.soc_margin = params['BESS'].get('soc_margin', 0.05)  # default 0.05 if not set
 
         # Seed everything
         random.seed(self.seed)
@@ -74,6 +79,11 @@ class PPOTrainer:
         self.obs_keys = obs_keys if obs_keys is not None else hp.obs_keys
         self.num_rollouts = num_rollouts
         self.rollout_length = hp.rollout_length
+
+        # Parâmetros para Lagrange dinâmico
+        self.lagrange_lambda = getattr(hp, 'lagrange_lambda', 1.0)
+        self.lagrange_lr = getattr(hp, "lagrange_lr", 0.05)
+        self.cost_limit = getattr(hp, "cost_limit", 0.01)
 
         if timestep is None:
             self.timestep = hp.timestep
@@ -111,30 +121,36 @@ class PPOTrainer:
             val_start_idx = (val_days[0] - 1) * self.steps_per_day
             val_ep_len = self.steps_per_day * len(val_days)
             self.eval_env = EnergyEnvContinuous(
-                data_dir=self.data_dir,
-                start_idx=val_start_idx,
-                episode_length=val_ep_len,
-                observations=self.obs_keys,
-                mode=self.hp.eval_mode
-            )
+                    data_dir=self.data_dir,
+                    start_idx=val_start_idx,
+                    episode_length=val_ep_len,
+                    observations=self.obs_keys,
+                    mode=self.hp.eval_mode
+                )
+
         else:
+            # fallback para 1 dia após treino
             self.val_days = [self.train_days[-1] + 1]
             eval_start = hp.start_idx + self.steps_per_day
             self.eval_env = EnergyEnvContinuous(
-                data_dir=self.data_dir,
-                start_idx=eval_start,
-                episode_length=self.steps_per_day,
-                observations=self.obs_keys,
-                mode='test'
-            )
+                    data_dir=self.data_dir,
+                    start_idx=eval_start,
+                    episode_length=self.steps_per_day,
+                    observations=self.obs_keys,
+                    mode='test'
+                )
 
         state_dim = len(self.obs_keys)
-        self.agent = PPOAgent(  # Mudou para o novo agente sem constraints
-            state_dim, 1, 
-            hp.p_min, hp.p_max
-        ).to(self.device)
-        self.actor_opt  = optim.Adam(self.agent.actor.parameters(), lr=hp.actor_lr)
-        self.critic_opt = optim.Adam(self.agent.critic.parameters(), lr=hp.critic_lr)
+        self.agent = ConstrainedPPOAgent(
+                state_dim, 1, 
+                hp.p_min, hp.p_max, 
+                soc_min=hp.soc_min, 
+                soc_max=hp.soc_max,
+                soc_margin=hp.soc_margin
+            ).to(self.device)
+        self.actor_opt  = optim.Adam(self.agent.actor.parameters(),       lr=hp.actor_lr)
+        self.critic_opt = optim.Adam(self.agent.critic.parameters(),      lr=hp.critic_lr)
+        self.cost_opt   = optim.Adam(self.agent.cost_critic.parameters(), lr=hp.cost_critic_lr)
         self.best_state = None
 
     def compute_gae(self, rewards, values, next_value, dones):
@@ -155,9 +171,11 @@ class PPOTrainer:
         actions  = torch.zeros((buffer_size, 1), dtype=torch.float32, device=self.device)
         old_lps  = torch.zeros(buffer_size, dtype=torch.float32, device=self.device)
         rewards  = torch.zeros(buffer_size, dtype=torch.float32, device=self.device)
+        costs    = torch.zeros(buffer_size, dtype=torch.float32, device=self.device)
         dones    = torch.zeros(buffer_size, dtype=torch.float32, device=self.device)
 
         total_r = 0.0
+        total_c = 0.0
         collected = 0
 
         state = self.env.reset()
@@ -168,23 +186,27 @@ class PPOTrainer:
             act, lp, _ = self.agent.sample_action(st.unsqueeze(0))
             act_np = act.detach().cpu().numpy() if isinstance(act, torch.Tensor) else act
             nxt, r, done, info = self.env.step(act_np)
+            c = self.agent.compute_soc_cost(st.unsqueeze(0)).item()
 
+            # DETACH TUDO que vai pro buffer!
             states[collected]   = st.detach()
             actions[collected]  = act.detach()
             old_lps[collected]  = lp.squeeze().detach()
             rewards[collected]  = torch.as_tensor(r, dtype=torch.float32, device=self.device)
+            costs[collected]    = torch.as_tensor(c, dtype=torch.float32, device=self.device)
             dones[collected]    = torch.as_tensor(done, dtype=torch.float32, device=self.device)
 
             total_r += r
+            total_c += info.get('energy_cost', 0.0)
             state = nxt
             collected += 1
             if done:
                 state = self.env.reset()
                 done = False
 
-        return states, actions, old_lps, rewards, dones, total_r
+        return states, actions, old_lps, rewards, costs, dones, total_r, total_c
 
-    def ppo_update(self, states, actions, old_lps, ret, adv):
+    def ppo_update(self, states, actions, old_lps, ret, adv, cadv, cret):
         for epoch in range(self.hp.ppo_epochs):
             idxs = torch.randperm(len(states))
             for i in range(0, len(states), self.hp.minibatch_size):
@@ -193,6 +215,8 @@ class PPOTrainer:
                 mb_oldlp = old_lps[mb]
                 mb_ret   = ret[mb]
                 mb_adv   = adv[mb]
+                mb_cadv  = cadv[mb]
+                mb_cret  = cret[mb]
 
                 mu, sigma = self.agent.actor(mb_st)
                 dist = Normal(mu, sigma)
@@ -204,24 +228,35 @@ class PPOTrainer:
                 p2    = torch.clamp(ratio, 1-self.hp.clip_epsilon, 1+self.hp.clip_epsilon) * mb_adv
                 pol_loss = -torch.min(p1, p2).mean()
 
-                vf_loss = F.mse_loss(self.agent.critic(mb_st).view(-1), mb_ret)
+                cost_loss = (ratio * mb_cadv).mean()
 
-                loss = pol_loss + 0.5 * vf_loss - self.hp.entropy_coef * entropy
+                vf_loss   = F.mse_loss(self.agent.critic(mb_st).view(-1), mb_ret)
+                vc_loss   = F.mse_loss(self.agent.cost_critic(mb_st).view(-1), mb_cret)
+
+                # Usando lagrange_lambda DINÂMICO
+                loss = pol_loss + 0.5*(vf_loss + vc_loss) \
+                        + self.lagrange_lambda * cost_loss \
+                        - self.hp.entropy_coef * entropy
 
                 self.actor_opt.zero_grad()
                 self.critic_opt.zero_grad()
+                self.cost_opt.zero_grad()
                 loss.backward()
                 self.actor_opt.step()
                 self.critic_opt.step()
+                self.cost_opt.step()
 
     def evaluate_validation(self):
-        soc_init_list = [0.1, 0.5, 0.9]
-        all_rewards = []
+        soc_init_list = [0.1, 0.3, 0.5, 0.7, 0.9]
+        all_rewards, all_costs = [], []
         for soc in soc_init_list:
-            _, _, _, _, _, v_r = self.run_episode(self.eval_env, soc_init=soc)
+            _, _, _, _, _, _, v_r, v_ec = self.run_episode(self.eval_env, soc_init=soc)
             all_rewards.append(v_r)
+            all_costs.append(v_ec)
         avg_reward = sum(all_rewards) / len(all_rewards)
-        return avg_reward
+        avg_cost = sum(all_costs) / len(all_costs)
+        return avg_reward, avg_cost
+
 
     def run_episode(self, env, soc_init=None):
         obs_dim = len(self.obs_keys)
@@ -230,9 +265,11 @@ class PPOTrainer:
         actions  = torch.zeros((max_steps, 1), dtype=torch.float32, device=self.device)
         old_lps  = torch.zeros(max_steps, dtype=torch.float32, device=self.device)
         rewards  = torch.zeros(max_steps, dtype=torch.float32, device=self.device)
+        costs    = torch.zeros(max_steps, dtype=torch.float32, device=self.device)
         dones    = torch.zeros(max_steps, dtype=torch.float32, device=self.device)
 
         total_r = 0.0
+        total_c = 0.0
         state = env.reset()
         if soc_init is not None:
             env.soc = soc_init
@@ -244,85 +281,130 @@ class PPOTrainer:
             act, lp, _ = self.agent.sample_action(st.unsqueeze(0))
             act_np = act.detach().cpu().numpy() if isinstance(act, torch.Tensor) else act
             nxt, r, done, info = env.step(act_np)
+            c = self.agent.compute_soc_cost(st.unsqueeze(0)).item()
 
             states[t]   = st.detach()
             actions[t]  = act.detach()
             old_lps[t]  = lp.squeeze().detach()
             rewards[t]  = torch.as_tensor(r, dtype=torch.float32, device=self.device)
+            costs[t]    = torch.as_tensor(c, dtype=torch.float32, device=self.device)
             dones[t]    = torch.as_tensor(done, dtype=torch.float32, device=self.device)
 
             total_r += r
+            total_c += info.get('energy_cost', 0.0)
             state = nxt
             t += 1
         return (
-            states[:t], actions[:t], old_lps[:t], rewards[:t], dones[:t], total_r
+            states[:t], actions[:t], old_lps[:t], rewards[:t], costs[:t], dones[:t], total_r, total_c
         )
 
     def train_and_validate(self):
-        total_r = 0.0
-        t_r = 0.0
+        total_r = total_c = 0.0
+        t_ec = t_r = v_r = v_ec = 0.0
         best_val = -float('inf')
         self.best_episode = 0
 
         with tqdm(range(self.num_rollouts), desc="Rollouts (train)", leave=False) as pbar:
             for rollout in pbar:
-                states, actions, old_lps, rewards, dones, ep_r = self.collect_rollout_buffer(self.rollout_length)
+                states, actions, old_lps, rewards, costs, dones, ep_r, ep_c = \
+                    self.collect_rollout_buffer(self.rollout_length)
                 total_r += ep_r
+                total_c += ep_c
 
                 with torch.no_grad():
-                    vals = self.agent.evaluate_state_value(states).squeeze()
+                    vals   = self.agent.evaluate_state_value(states).squeeze()
+                    cvals  = self.agent.evaluate_cost_value(states).squeeze()
                     nxt_st = torch.as_tensor(self.env.reset(), dtype=torch.float32, device=self.device).unsqueeze(0)
-                    nxt_v = self.agent.evaluate_state_value(nxt_st).item()
+                    nxt_v  = self.agent.evaluate_state_value(nxt_st).item()
+                    nxt_cv = self.agent.evaluate_cost_value(nxt_st).item()
 
-                adv, ret = self.compute_gae(rewards, vals, nxt_v, dones)
+                adv, ret    = self.compute_gae(rewards, vals, nxt_v, dones)
+                cadv, cret  = self.compute_gae(costs, cvals, nxt_cv, dones)
 
-                adv = adv.detach().to(self.device)
-                ret = ret.detach().to(self.device)
+                adv = adv.detach().to(self.device); ret = ret.detach().to(self.device)
+                cadv = cadv.detach().to(self.device); cret = cret.detach().to(self.device)
 
-                self.ppo_update(states, actions, old_lps, ret, adv)
+                self.ppo_update(states, actions, old_lps, ret, adv, cadv, cret)
 
-                t_r = total_r / ((rollout+1) * self.rollout_length)
-                v_r = self.evaluate_validation()
+                # Atualização dinâmica de Lagrange
+                avg_cost = costs.detach().mean().item()
+                self.lagrange_lambda = max(
+                    0.0,
+                    self.lagrange_lambda + self.lagrange_lr * (avg_cost - self.cost_limit)
+                )
+
+                t_ec = total_c / ((rollout+1) * self.rollout_length)
+                t_r  = total_r / ((rollout+1) * self.rollout_length)
+                v_r, v_ec = self.evaluate_validation()
 
                 pbar.set_postfix({
                     "t_r": f"{t_r:.2f}",
+                    "t_ec": f"{t_ec:.2f}",
                     "v_r": f"{v_r:.2f}",
-                    
-                    # "SoC0": f"{self.env.initial_soc:.2f}",
-                    # "Pmin": f"{self.env.PEDS_min:.2f}",
-                    # "Pmax": f"{self.env.PEDS_max:.2f}",
+                    "v_ec": f"{v_ec:.2f}",
+                    "SoC0": f"{self.env.initial_soc:.2f}",
+                    "Pmin": f"{self.env.PEDS_min:.2f}",
+                    "Pmax": f"{self.env.PEDS_max:.2f}",
                     "idx0": self.env.start_idx,
                     'dif': f"{self.env.difficulty:.2f}",
                     'b_ep': self.best_episode,
                     'b_val': f"{best_val:.2f}",
+                    "lambda": f"{self.lagrange_lambda:.3f}",
+                    "c_avg": f"{avg_cost:.4f}"
                 })
 
                 if v_r > best_val:
                     best_val = v_r
                     self.best_state = self.agent.state_dict()
                     self.best_episode = rollout
+                if (rollout + 1) % self.hp.checkpoint_freq == 0:
+                    save_path = os.path.join(
+                        'models/ppo', f"ppo_checkpoint_{rollout+1}.pt"
+                    )
+                    torch.save(self.agent.state_dict(), save_path)
+                    # Save the best model
+                    save_path = os.path.join(
+                        'models/ppo', f"ppo_best_model_{self.best_episode}.pt"
+                    )
+                    if self.best_state is not None:
+                        torch.save(self.best_state, save_path)
 
-                # if (rollout + 1) % self.hp.checkpoint_freq == 0:
-                #     save_path = os.path.join(
-                #         'models/ppo', f"ppo_checkpoint_{rollout+1}.pt"
-                #     )
-                #     torch.save(self.agent.state_dict(), save_path)
-                #     # Save the best model
-                #     save_path = os.path.join(
-                #         'models/ppo', f"ppo_best_model_{self.best_episode}.pt"
-                #     )
-                #     if self.best_state is not None:
-                #         torch.save(self.best_state, save_path)
-
-        print(f"t_r: {t_r:.2f} | v_r: {v_r:.2f}")
+        print(f"t_r: {t_r:.2f} | t_ec: {t_ec:.2f} | v_r: {v_r:.2f} | v_ec: {v_ec:.2f}")
         print(f"Best episode: {self.best_episode} | Best value: {best_val:.2f}")
         print(f"Best model saved at: {self.best_state}")
 
-        return t_r, v_r
+        return t_r, t_ec, v_r, v_ec
 
     def evaluate(self):
         return self.evaluate_validation()
 
+
+import matplotlib.pyplot as plt
+
+def run_episode_for_plot(env, agent, device):
+    state = env.reset()
+    done = False
+    times, socs, p_bess, p_grid, p_pv, p_load = ([] for _ in range(6))
+    rewards, energy_costs = [], []
+    agent.eval()
+    with torch.inference_mode():
+        while not done:
+            st = torch.as_tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+            action, _, _ = agent.sample_action(st)
+            act_np = action.detach().cpu().numpy() if isinstance(action, torch.Tensor) else action
+            nxt, r, done, info = env.step(act_np)
+            rewards.append(r)
+            energy_costs.append(info.get('energy_cost', 0.0))
+            t = info.get('time', len(times))
+            times.append(t)
+            socs.append(env.soc)
+            p_bess.append(info.get('p_bess', 0.0))
+            p_grid.append(info.get('p_grid', 0.0))
+            p_pv.append(env.pv_series.loc[t] * env.PVmax if hasattr(env, 'pv_series') else 0.0)
+            p_load.append(env.load_series.loc[t] * env.Loadmax if hasattr(env, 'load_series') else 0.0)
+            state = nxt
+    return dict(times=times, soc=socs, p_bess=p_bess, p_grid=p_grid, p_pv=p_pv, p_load=p_load,
+                rewards=rewards, energy_costs=energy_costs)
 
 if __name__ == "__main__":
     param_path = 'data/parameters.json'

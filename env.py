@@ -9,16 +9,21 @@ class EnergyEnvContinuous(gym.Env):
     """
     Continuous-action energy environment for BESS control with curriculum learning 
     and optional randomization.
-    Modes: 'train', 'test', 'eval'.
+    Modes: 'train', 'test'.
     """
 
     def __init__(self,
                  data_dir='data',
+                 dataset='train',           # Specify the dataset explicitly!
                  start_idx=0,
                  episode_length=288,
                  observations=None,
                  mode='train'):
         super().__init__()
+
+        assert mode in ['train', 'test'], "mode must be 'train' or 'test'"
+        self.train_mode = (mode == 'train')
+        self.test_mode  = (mode == 'train')
 
         # Load configuration
         cfg_path = os.path.join(data_dir, 'parameters.json')
@@ -38,8 +43,6 @@ class EnergyEnvContinuous(gym.Env):
         self.soc         = self.initial_soc
 
         # --- Curriculum and randomization flags ---
-        self.test_mode       = (mode != 'train')
-        self.eval_mode       = (mode == 'eval')
         self.curriculum      = env_cfg.get('curriculum', 'False').upper() == 'TRUE'
         self.curriculum_steps= int(env_cfg.get('curriculum_steps', 1))
         self.curriculum_inc  = float(env_cfg.get('curriculum_increment', 0.0))
@@ -72,15 +75,15 @@ class EnergyEnvContinuous(gym.Env):
         )
 
         # --- Load time series ---
-        split = 'train' if mode in ('train','eval') else 'test'
+        # Use the dataset parameter directly
         self.pv_series = pd.read_csv(
-            os.path.join(data_dir, f'pv_5min_{split}.csv'),
+            os.path.join(data_dir, f'pv_5min_{dataset}.csv'),
             index_col='timestamp', parse_dates=['timestamp']
         )['p_norm']
         assert not self.pv_series.isna().any(), "pv_series contém NaN!"
 
         self.load_series = pd.read_csv(
-            os.path.join(data_dir, f'load_5min_{split}.csv'),
+            os.path.join(data_dir, f'load_5min_{dataset}.csv'),
             index_col='timestamp', parse_dates=['timestamp']
         )['p_norm']
         assert not self.load_series.isna().any(), "load_series contém NaN!"
@@ -109,38 +112,34 @@ class EnergyEnvContinuous(gym.Env):
             dtype=np.float32
         )
 
-
     def reset(self, initial_soc=None):
         # Update curriculum difficulty
-        if not self.test_mode and self.curriculum:
+        if self.train_mode and self.curriculum:
             self.episode_counter += 1
             if self.episode_counter == self.curriculum_steps:
                 self.difficulty = min(self.difficulty + self.curriculum_inc, self.curriculum_max)
                 self.episode_counter = 0
 
         # Randomize start index if configured
-        if not self.test_mode and self.randomize and self.randomize_idx:
+        if self.train_mode and self.randomize and self.randomize_idx:
             lim = int((0.2 + 0.6*self.difficulty) * 0.1 * len(self.pv_series))
             self.start_idx = np.random.randint(0, max(1, lim - self.episode_length))
          
         self.current_idx = self.start_idx
         self.end_idx     = self.start_idx + self.episode_length
 
-        # ----------- Alteração 1 e 3: randomizar e/ou setar SoC inicial ----------- #
+        # Option to set SoC at reset
         if initial_soc is not None:
-            # Usuário define o SoC inicial explicitamente
             self.initial_soc = float(np.clip(initial_soc, 0.0, 1.0))
-        elif ((not self.test_mode or self.eval_mode) and self.randomize and self.randomize_soc):
-            # Randomize SoC inicial mesmo em modo eval!
+        elif (self.train_mode and self.randomize and self.randomize_soc):
             rng = 0.05 + self.difficulty * 0.95
             low, high = max(0, 0.5 - rng/2), min(1, 0.5 + rng/2)
             self.initial_soc = np.random.uniform(low, high)
-        # ------------------------------------------------------------------------ #
 
         self.soc = self.initial_soc
 
         # Randomize EDS limits if configured
-        if not self.test_mode and self.randomize and self.randomize_eds:
+        if self.train_mode and self.randomize and self.randomize_eds:
             scale = 0.05 + self.difficulty
             fac   = 1 + np.random.uniform(-scale, scale)
             self.PEDS_max = max(0, self.params['EDS']['Pmax'] * fac)
@@ -219,13 +218,13 @@ class EnergyEnvContinuous(gym.Env):
         gv = (ov + ud) * self.grid_violation_coef * self.dt
 
         # Potential-based shaping
-        k      = self.params['RL'].get('potential_scale', 0.0)
-        γ      = self.params['RL'].get('gamma', 0.0)
+        k      = self.params['RL'].get('potential_scale', 1.0)
+        gamma  = self.params['RL'].get('gamma', 1.0)
         ind    = float(p_pv > p_load)
         soc_b  = self.soc
         self._update_soc(p_req)
         soc_a  = self.soc
-        shaping= γ * (k * soc_a * ind) - (k * soc_b * ind)
+        shaping= gamma * (k * soc_a * ind) - (k * soc_b * ind)
 
         reward = -e_cost + shaping - gv
 
