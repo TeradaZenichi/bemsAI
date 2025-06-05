@@ -1,0 +1,12 @@
+Kirkpatrick, J. et al. "Overcoming catastrophic forgetting in neural networks." PNAS 2017. 
+
+https://www.pnas.org/doi/10.1073/pnas.1611835114
+
+
+A review of catastrophic forgetting solutions in Deep Reinforcement Learning — destaca uso de EWC em arquiteturas modernas, incluindo attention.
+
+https://arxiv.org/abs/2206.12832 
+
+Papers de continual learning com transformers, como “Continual Learning in Transformers with Orthogonal Weight Modification” (2023), mostram EWC como baseline.
+
+https://arxiv.org/abs/2303.00580

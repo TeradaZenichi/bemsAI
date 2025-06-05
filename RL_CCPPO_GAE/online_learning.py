@@ -4,7 +4,6 @@ import json
 import torch
 import numpy as np
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 
 # Permitir imports do diretório raiz do projeto
 target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -53,6 +52,7 @@ def generate_train_val_windows(total_days, train_window, val_window):
     return train_days_list, val_days_list
 
 def main():
+    # Paths dos arquivos de configuração
     params_path = 'data/parameters.json'
     model_path = 'RL_CCPPO_GAE/model.json'
     online_path = 'RL_CCPPO_GAE/online_learning.json'
@@ -71,13 +71,18 @@ def main():
     for i, (train_days, val_days) in enumerate(zip(train_days_list, val_days_list)):
         print(f"\n=== Online Learning Step {i+1}: Training on {train_days} | Validating on {val_days} ===")
 
+        # Carrega os hiperparâmetros e reseta a entropia para o valor inicial
         hp = HyperParameters(params_path, model_path)
+        initial_entropy_coef = hp.entropy_coef  # valor original do JSON
+
         trainer = PPOTrainer(
             hp,
             train_days=train_days,
             val_days=val_days,
             num_rollouts=num_rollouts
         )
+        # Reset explícito do entropy coef a cada janela
+        trainer.hp.entropy_coef = initial_entropy_coef
 
         # Resume se configurado
         first_day = train_days[0]
@@ -92,6 +97,7 @@ def main():
                 print(f"Loading weights from {prev_ckpt}")
                 trainer.agent.load_state_dict(torch.load(prev_ckpt))
 
+        # Treinamento e validação
         t_r, v_r = trainer.train_and_validate()
 
         # Salva checkpoint e métricas
@@ -99,7 +105,8 @@ def main():
             "train_days": train_days,
             "val_days": val_days,
             "t_r": t_r,
-            "v_r": v_r
+            "v_r": v_r,
+            "entropy_coef": initial_entropy_coef
         }
         save_checkpoint(trainer, train_days, save_dir, extra_info)
 

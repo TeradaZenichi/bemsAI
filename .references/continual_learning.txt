@@ -1,0 +1,134 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\title{Principais Estratégias para Continual Learning}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Estratégias de Continual Learning}
+
+A seguir, apresentamos um panorama das principais estratégias de \textit{continual learning}, suas variações e referências clássicas para cada método.
+
+\begin{enumerate}[label=\textbf{\arabic*.}]
+    \item \textbf{Regularização de Parâmetros}
+    \begin{itemize}
+        \item \textbf{Elastic Weight Consolidation (EWC):} Penaliza alterações em pesos importantes para tarefas anteriores, protegendo o conhecimento adquirido~\cite{Kirkpatrick2017}.
+        \item \textbf{Synaptic Intelligence (SI), Memory Aware Synapses (MAS):} Variam o cálculo de importância dos pesos~\cite{Zenke2017,Aljundi2018}.
+        \item \textbf{Learning without Forgetting (LwF):} Usa distilação para forçar a rede a preservar o conhecimento das tarefas antigas~\cite{Li2017}.
+    \end{itemize}
+
+    \item \textbf{Replay (Relembrar Exemplos Antigos)}
+    \begin{itemize}
+        \item \textbf{Experience Replay:} Amostras passadas são armazenadas e misturadas ao treino atual~\cite{Rolnick2019}.
+        \item \textbf{Generative Replay:} Um gerador (ex: GAN) simula experiências antigas~\cite{Shin2017}.
+    \end{itemize}
+
+    \item \textbf{Interleaving/Intercalamento}
+    \begin{itemize}
+        \item Amostras antigas e novas são intercaladas em cada lote de treino para minimizar o esquecimento~\cite{Rebuffi2017,Hayes2020}.
+    \end{itemize}
+
+    \item \textbf{Métodos Arquiteturais/Dinâmicos (Expansão do Modelo)}
+    \begin{itemize}
+        \item \textbf{Progressive Neural Networks:} Novos módulos são adicionados para cada tarefa~\cite{Rusu2016}.
+        \item \textbf{Dynamically Expandable Networks (DEN):} Expansão dinâmica da arquitetura~\cite{Yoon2018}.
+        \item \textbf{PackNet:} Pruning iterativo para liberar espaço para novas tarefas~\cite{Mallya2018}.
+    \end{itemize}
+
+    \item \textbf{Métodos Baseados em Máscara/Ativação}
+    \begin{itemize}
+        \item \textbf{Hard Attention to the Task (HAT):} Máscaras binárias ativam partes específicas da rede~\cite{Serra2018}.
+        \item \textbf{Supermasks/Task-specific Masks:} Segmentação da rede por tarefa~\cite{Wortsman2020}.
+    \end{itemize}
+
+    \item \textbf{Métodos de Distilação}
+    \begin{itemize}
+        \item \textbf{Knowledge Distillation:} Força o modelo a manter saídas semelhantes ao anterior~\cite{Hinton2015}.
+        \item \textbf{Learning without Forgetting (LwF):} Exemplo prático de distilação em continual learning~\cite{Li2017}.
+    \end{itemize}
+
+    \item \textbf{Meta-Learning}
+    \begin{itemize}
+        \item Técnicas como \textbf{Reptile} e \textbf{MAML} treinam modelos para rápida adaptação sem esquecimento~\cite{Finn2017,Nichol2018}.
+    \end{itemize}
+
+    \item \textbf{Data Augmentation Temporal}
+    \begin{itemize}
+        \item Mistura e alteração de experiências antigas para simular maior diversidade~\cite{Isele2018}.
+    \end{itemize}
+
+    \item \textbf{Métodos Específicos para RL}
+    \begin{itemize}
+        \item \textbf{Policy Consolidation} e \textbf{Policy Distillation} evitam esquecimento de políticas em RL~\cite{Schwarz2018,Rusu2016b}.
+    \end{itemize}
+\end{enumerate}
+
+\section*{Referências}
+
+\begin{thebibliography}{99}
+    \bibitem{Kirkpatrick2017}
+    J. Kirkpatrick et al., ``Overcoming catastrophic forgetting in neural networks,'' \textit{PNAS}, 2017.
+
+    \bibitem{Zenke2017}
+    F. Zenke, B. Poole, and S. Ganguli, ``Continual learning through synaptic intelligence,'' \textit{ICML}, 2017.
+
+    \bibitem{Aljundi2018}
+    R. Aljundi et al., ``Memory Aware Synapses: Learning what (not) to forget,'' \textit{ECCV}, 2018.
+
+    \bibitem{Li2017}
+    Z. Li and D. Hoiem, ``Learning without Forgetting,'' \textit{IEEE TPAMI}, 2017.
+
+    \bibitem{Rolnick2019}
+    D. Rolnick et al., ``Experience replay for continual learning,'' \textit{NeurIPS}, 2019.
+
+    \bibitem{Shin2017}
+    H. Shin et al., ``Continual Learning with Deep Generative Replay,'' \textit{NeurIPS}, 2017.
+
+    \bibitem{Rebuffi2017}
+    S.-A. Rebuffi et al., ``iCaRL: Incremental Classifier and Representation Learning,'' \textit{CVPR}, 2017.
+
+    \bibitem{Hayes2020}
+    T. L. Hayes, N. D. Cahill, and C. Kanan, ``Memory Efficient Experience Replay for Streaming Learning,'' \textit{arXiv preprint arXiv:2002.10082}, 2020.
+
+    \bibitem{Rusu2016}
+    A. A. Rusu et al., ``Progressive Neural Networks,'' \textit{arXiv:1606.04671}, 2016.
+
+    \bibitem{Yoon2018}
+    J. Yoon et al., ``Lifelong Learning with Dynamically Expandable Networks,'' \textit{ICLR}, 2018.
+
+    \bibitem{Mallya2018}
+    A. Mallya and S. Lazebnik, ``PackNet: Adding Multiple Tasks to a Single Network by Iterative Pruning,'' \textit{CVPR}, 2018.
+
+    \bibitem{Serra2018}
+    J. Serra et al., ``Overcoming Catastrophic Forgetting with Hard Attention to the Task,'' \textit{ICML}, 2018.
+
+    \bibitem{Wortsman2020}
+    M. Wortsman et al., ``Supermasks in Superposition,'' \textit{NeurIPS}, 2020.
+
+    \bibitem{Hinton2015}
+    G. Hinton, O. Vinyals, and J. Dean, ``Distilling the Knowledge in a Neural Network,'' \textit{arXiv:1503.02531}, 2015.
+
+    \bibitem{Finn2017}
+    C. Finn, P. Abbeel, and S. Levine, ``Model-Agnostic Meta-Learning for Fast Adaptation of Deep Networks,'' \textit{ICML}, 2017.
+
+    \bibitem{Nichol2018}
+    A. Nichol, J. Achiam, and J. Schulman, ``On First-Order Meta-Learning Algorithms,'' \textit{arXiv:1803.02999}, 2018.
+
+    \bibitem{Isele2018}
+    D. Isele and A. Cosgun, ``Selective Experience Replay for Lifelong Learning,'' \textit{AAAI}, 2018.
+
+    \bibitem{Schwarz2018}
+    J. Schwarz et al., ``Progress \& Compress: A scalable framework for continual learning,'' \textit{ICML}, 2018.
+
+    \bibitem{Rusu2016b}
+    A. A. Rusu et al., ``Policy Distillation,'' \textit{ICLR}, 2016.
+\end{thebibliography}
+
+\end{document}

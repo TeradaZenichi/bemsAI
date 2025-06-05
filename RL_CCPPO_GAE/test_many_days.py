@@ -1,118 +1,110 @@
-import sys
 import os
+import sys
 import re
 import json
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Permitir imports do diretório raiz
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Permitir imports do diretório raiz do projeto
+target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(target_path)
 
 from env import EnergyEnvContinuous
-from RL_CCPPO_GAE.model import ConstrainedPPOAgent
+from RL_CCPPO_GAE.model import PPOAgent
+from RL_CCPPO_GAE.train import HyperParameters
 
-def load_json(path):
-    with open(path, 'r') as f:
-        return json.load(f)
+# Diretório dos modelos
+MODEL_DIR = "models/online/ppo"
 
-def run_episode(env, agent, device):
-    state = env.reset()
+# Regex para identificar arquivos de modelo por dia
+MODEL_REGEX = r'ppo_best_model_day(\d+)\.pt'
+
+# Parâmetros dos arquivos de configuração
+param_path = 'data/parameters.json'
+model_path = 'RL_CCPPO_GAE/model.json'
+
+# Carrega as configs
+hp = HyperParameters(param_path, model_path)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Parâmetros do ambiente de teste
+test_dataset = 'test'
+pv_test_path = os.path.join(hp.data_dir, f"pv_5min_{test_dataset}.csv")
+pv_df = None
+try:
+    import pandas as pd
+    pv_df = pd.read_csv(pv_test_path)
+    n_steps = int(0.2*len(pv_df))
+except Exception as e:
+    print(f"Erro ao ler {pv_test_path}: {e}")
+    raise
+
+def run_full_test_episode(agent, env, device, soc_init=0.5):
+    state = env.reset(initial_soc=soc_init)  # Passa o SoC inicial aqui
     done = False
-    total_reward = 0.0
     total_energy_cost = 0.0
-    agent.eval()
-    with torch.no_grad():
-        while not done:
-            st = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-            action, _, _ = agent.sample_action(st)
-            next_state, reward, done, info = env.step(action.cpu().numpy())
-            total_reward      += reward
-            total_energy_cost += info.get('energy_cost', 0.0)
-            state = next_state
-    return total_reward, total_energy_cost
+    while not done:
+        st = torch.as_tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+        action, _, _ = agent.sample_action(st)
+        act_np = action.detach().cpu().numpy() if isinstance(action, torch.Tensor) else action
+        nxt, _, done, info = env.step(act_np)
+        total_energy_cost += info.get('energy_cost', 0.0)
+        state = nxt
+    return total_energy_cost
 
-def find_models(folder):
-    """
-    Busca modelos treinados incrementalmente no padrão:
-    'model_until_dayX_valY.pt'
-    """
-    model_files = []
-    pattern = re.compile(r"model_until_day(\d+)_val(\d+)\.pt$")
-    for fname in os.listdir(folder):
-        m = pattern.match(fname)
-        if m:
-            train_until = int(m.group(1))
-            val_day = int(m.group(2))
-            model_files.append({
-                'path': os.path.join(folder, fname),
-                'train_until': train_until,
-                'val_day': val_day
-            })
-    # Ordena pela quantidade de dias de treino (opcional)
-    model_files.sort(key=lambda x: x['train_until'])
-    return model_files
+# Listar todos os arquivos no diretório
+files = os.listdir(MODEL_DIR)
+model_days = []
+test_energy_costs = []
 
-def main(params_path, model_cfg_path, models_folder):
-    # 1. Carrega parâmetros e configurações do modelo
-    params = load_json(params_path)
-    model_cfg = load_json(model_cfg_path)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+soc_values = [0.0, 0.5, 1.0]
 
-    # 2. Instancia o ambiente de teste (pode ajustar aqui o período de teste)
-    env = EnergyEnvContinuous(
-        data_dir      = 'data',
-        start_idx     = model_cfg.get('test_start_idx', 0),
-        episode_length= model_cfg.get('test_episode_length', model_cfg.get('episode_length', 2*288)),
-        observations  = model_cfg['observations'],
-        mode          = 'test'
-    )
-
-    # 3. Busca todos os modelos salvos
-    model_list = find_models(models_folder)
-
-    # 4. Avalia todos os modelos no mesmo conjunto de teste
-    costs = []
-    trained_days = []
-    for model_info in model_list:
-        agent = ConstrainedPPOAgent(
-            state_dim = len(model_cfg['observations']),
-            action_dim= 1,
-            p_min     = -params['BESS']['Pmax_d'],
-            p_max     = params['BESS']['Pmax_c']
+for f in files:
+    match = re.match(MODEL_REGEX, f)
+    if match:
+        day = int(match.group(1))
+        model_path_pt = os.path.join(MODEL_DIR, f)
+        agent = PPOAgent(
+            state_dim=len(hp.obs_keys),
+            action_dim=1,
+            p_min=hp.p_min,
+            p_max=hp.p_max
         ).to(device)
-        agent.load_state_dict(torch.load(model_info['path'], map_location=device))
+        agent.load_state_dict(torch.load(model_path_pt, map_location=device))
+        agent.eval()
 
-        # Reinicia o ambiente para cada modelo!
-        env.reset()
-        _, total_energy_cost = run_episode(env, agent, device)
-        trained_days.append(model_info['train_until'])
-        costs.append(total_energy_cost)
-        print(f"Modelo treinado até o dia {model_info['train_until']}: energy cost no teste = {total_energy_cost:.2f}")
+        energy_costs = []
+        with torch.inference_mode():
+            for soc in soc_values:
+                env = EnergyEnvContinuous(
+                    data_dir=hp.data_dir,
+                    dataset='test',
+                    start_idx=0,
+                    episode_length=n_steps,
+                    observations=hp.obs_keys,
+                    mode='test'
+                )
+                test_ec = run_full_test_episode(agent, env, device, soc_init=soc)
+                energy_costs.append(test_ec)
+        avg_ec = np.mean(energy_costs)
 
-    # 5. Gráfico
-    plt.figure(figsize=(8, 5))
-    plt.plot(trained_days, costs, marker='o')
-    plt.xlabel("Nº de dias usados no treino")
-    plt.ylabel("Total energy cost (conjunto de teste)")
-    plt.title("Desempenho dos modelos em teste incremental")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("energy_cost_vs_days.png")
-    plt.show()
+        model_days.append(day)
+        test_energy_costs.append(avg_ec)
+        print(f"Modelo do dia {day}: Test energy cost (média dos SoC {soc_values}) = {avg_ec:.2f}")
 
-if __name__ == '__main__':
-    # Caminhos default
-    params_path    = 'data/parameters.json'
-    model_cfg_path = 'RL_CCPPO_GAE/model.json'
-    models_folder  = 'models/few_datas_ppo'   # <== Sua pasta de modelos incrementais
+# Ordenar por dia para plotar corretamente
+order = np.argsort(model_days)
+model_days = np.array(model_days)[order].astype(int)
+test_energy_costs = np.array(test_energy_costs)[order]
 
-    # Pode sobrescrever com argumentos
-    if len(sys.argv) > 1:
-        params_path = sys.argv[1]
-    if len(sys.argv) > 2:
-        model_cfg_path = sys.argv[2]
-    if len(sys.argv) > 3:
-        models_folder = sys.argv[3]
-
-    main(params_path, model_cfg_path, models_folder)
+plt.figure(figsize=(8, 5))
+plt.bar(model_days, test_energy_costs, width=0.7, align='center')
+plt.xlabel('Dia inicial do modelo')
+plt.ylabel('Test Energy Cost (Média)')
+plt.title('Modelo vs. Test Energy Cost (Média para SoC 0, 0.5, 1)')
+plt.grid(axis='y')
+plt.xticks(model_days)  # eixo x inteiro, um para cada dia disponível
+plt.tight_layout()
+plt.savefig('energy_cost_vs_model_day.png')
+plt.show()

@@ -95,7 +95,7 @@ class EnergyEnvContinuous(gym.Env):
         self.PEDS_max           = eds_cfg['Pmax']
         self.PEDS_min           = eds_cfg['Pmin']
         self.cost_dict          = eds_cfg.get('cost', {})
-        self.grid_violation_coef= config['RL'].get('grid_violation_penalty', 10.0)
+        self.grid_violation_coef= config['RL'].get('grid_violation_penalty', 0.0)
 
         # --- Observation space ---
         default_keys = [

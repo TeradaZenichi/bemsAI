@@ -8,7 +8,7 @@ from RL_CCPPO_GAE.model import PPOAgent
 # Paths and configuration
 param_path = 'data/parameters.json'
 model_path = 'RL_CCPPO_GAE/model.json'
-load_path = 'Models/ppo/ppo_best_model_413.pt'  # Altere para seu modelo salvo
+load_path = 'Models/online/ppo/ppo_best_model_day1.pt'  # Altere para seu modelo salvo
 
 val_days = [4, 5, 6]  # Dias a serem avaliados
 
