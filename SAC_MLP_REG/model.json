@@ -25,7 +25,7 @@
   },
   "seed": 42,
   "start_idx": 0,
-  "max_updates": 1000,
+  "max_updates": 50000,
   "checkpoint_freq": 10,
   "observations": [
     "pv", "load", "soc", "tariff",
@@ -37,7 +37,7 @@
   ],
   "agent_params": {
     "gamma": 0.99,
-    "alpha": 0.2,                      
+    "alpha": 0.7,                      
     "actor_lr": 0.0003,
     "critic_lr": 0.001,
     "alpha_lr": 0.0001,                 
@@ -52,7 +52,8 @@
     "lambda_lwf": 1.0,                  
     "lambda_wd": 0.0001,               
     "early_stopping_patience": 200,
-    "min_delta": 0.01
+    "min_delta": 0.01,
+    "buffer_capacity": 1000
   },
   "log_dir": "logs",
   "model_dir": "models/sac_reg"

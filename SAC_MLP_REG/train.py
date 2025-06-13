@@ -73,6 +73,7 @@ class HyperParameters:
         self.p_max           = params['BESS']['Pmax_c']
         self.p_min           = -params['BESS']['Pmax_d']
         self.timestep        = params.get('timestep', 5)
+        self.buffer_capacity = agent_cfg.get('buffer_capacity', 1_000_000)
         random.seed(self.seed)
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)
@@ -221,9 +222,9 @@ def standard_test(agent, test_days, hp, device, steps_per_day, soc_values=[0.0, 
     all_df = pd.concat(dfs, ignore_index=True)
     return mean_cost, costs_per_soc, mean_reward, rewards_per_soc, all_df
 
-# ===================== SAC Trainer =======================
+
 class SACTrainer:
-    def __init__(self, hp, train_days=None, val_days=None, device=None, buffer_capacity=1_000_000,
+    def __init__(self, hp, train_days=None, val_days=None, device=None, buffer_capacity=1000,
                  regularization_state=None,
                  fisher=None, prev_params_ewc=None,
                  omega_si=None, prev_params_si=None,
@@ -234,7 +235,7 @@ class SACTrainer:
         self.batch_size = hp.batch_size
         self.gamma = hp.gamma
         self.tau = hp.tau
-        self.alpha = hp.alpha  # fixed; could be adaptive
+        self.buffer_capacity = hp.buffer_capacity
 
         self.fisher = fisher
         self.prev_params_ewc = prev_params_ewc
@@ -296,11 +297,13 @@ class SACTrainer:
         self.actor_opt = torch.optim.Adam(self.agent.actor.parameters(), lr=hp.actor_lr)
         self.critic_1_opt = torch.optim.Adam(self.agent.critic_1.parameters(), lr=hp.critic_lr)
         self.critic_2_opt = torch.optim.Adam(self.agent.critic_2.parameters(), lr=hp.critic_lr)
-        # Alpha fixed for simplicity (adapt if needed)
+        # ----------- Entropy (Alpha) tuning -----------
+        self.log_alpha = torch.tensor(np.log(hp.alpha), requires_grad=True, device=self.device)
+        self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=hp.alpha_lr)
+        self.target_entropy = hp.target_entropy  # ex: -1.0 para ação escalar
 
-        self.replay_buffer = ReplayBuffer(buffer_capacity)
+        self.replay_buffer = ReplayBuffer(self.buffer_capacity)
         self.best_state = None
-        # TODO: store regularization state if needed
 
     # === REGULARIZATION PENALTIES ===
     def penalty_ewc(self):
@@ -390,13 +393,16 @@ class SACTrainer:
                 if a.dim() == 1:
                     a = a.unsqueeze(-1)
 
+                # ---------------- Alpha (entropy) value ----------------
+                alpha = self.log_alpha.exp()
+
                 # Critic targets
                 with torch.no_grad():
                     next_action, next_log_prob, _ = self.agent.sample_action(ns)
                     next_action = torch.clamp(next_action, self.hp.p_min, self.hp.p_max)
                     target_q1 = self.target_critic_1(ns, next_action)
                     target_q2 = self.target_critic_2(ns, next_action)
-                    target_q = torch.min(target_q1, target_q2) - self.alpha * next_log_prob
+                    target_q = torch.min(target_q1, target_q2) - alpha * next_log_prob
                     target = r + self.hp.gamma * (1 - d) * target_q
 
                 # Critic update
@@ -415,7 +421,7 @@ class SACTrainer:
                 new_action, log_prob, _ = self.agent.sample_action(s)
                 q1_new, q2_new = self.agent.critic_1(s, new_action), self.agent.critic_2(s, new_action)
                 q_new = torch.min(q1_new, q2_new)
-                actor_loss = (self.alpha * log_prob - q_new).mean()
+                actor_loss = (alpha * log_prob - q_new).mean()
 
                 # ---- REGULARIZATION ----
                 if self.hp.lambda_ewc > 0.0:
@@ -431,13 +437,20 @@ class SACTrainer:
                 actor_loss.backward()
                 self.actor_opt.step()
 
+                # ----------- Alpha update (automatic entropy tuning) -----------
+                entropy = -log_prob  # negative log prob (entropy)
+                alpha_loss = -(self.log_alpha * (entropy + self.target_entropy).detach()).mean()
+                self.alpha_opt.zero_grad()
+                alpha_loss.backward()
+                self.alpha_opt.step()
+
                 # Target update
                 self.update_targets()
 
                 if (step + 1) % steps_per_epoch == 0:
                     # Validação: execute política determinística e avalie recompensa média
                     val_r = self.evaluate_validation()
-                    pbar.set_postfix({"val_r": f"{val_r:.2f}", "step": step+1})
+                    pbar.set_postfix({"val_r": f"{val_r:.2f}", "alpha": self.log_alpha.exp().item(), "step": step+1})
 
                     if val_r > best_val:
                         best_val = val_r
@@ -454,6 +467,7 @@ class SACTrainer:
             _, v_r, _ = run_episode_collect(self.agent, self.eval_env, self.device, soc_init=soc, deterministic=True)
             all_rewards.append(v_r)
         return float(np.mean(all_rewards))
+
 
 
 # ========================= MAIN ==========================

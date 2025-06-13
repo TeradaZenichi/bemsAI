@@ -4,8 +4,8 @@
   "val_window": 2,
   "num_rollouts": 1000,
   "test_days": 30,
-  "resume_from_exp_type": "NONE",
-  "resume_from_day": 17,
+  "resume_from_exp_type": null,
+  "resume_from_day": null,
   "experiments": [
     {
       "exp_type": "NONE",
