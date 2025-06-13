@@ -363,6 +363,11 @@ class SACTrainer:
         total_steps = 0
         episode_reward = 0.0
         episode_rewards = []
+        episode_counter = 0
+
+        stats_log = []  # Aqui serão salvas as estatísticas
+
+        print(f"Target entropy: {self.target_entropy}")
 
         with tqdm(range(num_steps), desc="SAC training", leave=False) as pbar:
             for step in pbar:
@@ -378,25 +383,20 @@ class SACTrainer:
                 # If done, reset episode
                 if done:
                     episode_rewards.append(episode_reward)
-                    state = self.env.reset()
                     episode_reward = 0.0
+                    state = self.env.reset()
+                    done = False
+                    episode_counter += 1
 
-                # Update only if buffer has enough samples
                 if len(self.replay_buffer) < min_buffer_size:
                     continue
 
-                # === Sample batch ===
                 s, a, r, ns, d = self.replay_buffer.sample(self.batch_size)
                 s = s.to(self.device); a = a.to(self.device); r = r.to(self.device)
                 ns = ns.to(self.device); d = d.to(self.device)
-
                 if a.dim() == 1:
                     a = a.unsqueeze(-1)
-
-                # ---------------- Alpha (entropy) value ----------------
                 alpha = self.log_alpha.exp()
-
-                # Critic targets
                 with torch.no_grad():
                     next_action, next_log_prob, _ = self.agent.sample_action(ns)
                     next_action = torch.clamp(next_action, self.hp.p_min, self.hp.p_max)
@@ -405,7 +405,6 @@ class SACTrainer:
                     target_q = torch.min(target_q1, target_q2) - alpha * next_log_prob
                     target = r + self.hp.gamma * (1 - d) * target_q
 
-                # Critic update
                 current_q1 = self.agent.critic_1(s, a)
                 current_q2 = self.agent.critic_2(s, a)
                 critic1_loss = F.mse_loss(current_q1, target)
@@ -417,13 +416,11 @@ class SACTrainer:
                 critic2_loss.backward()
                 self.critic_2_opt.step()
 
-                # Actor update
                 new_action, log_prob, _ = self.agent.sample_action(s)
                 q1_new, q2_new = self.agent.critic_1(s, new_action), self.agent.critic_2(s, new_action)
                 q_new = torch.min(q1_new, q2_new)
                 actor_loss = (alpha * log_prob - q_new).mean()
 
-                # ---- REGULARIZATION ----
                 if self.hp.lambda_ewc > 0.0:
                     actor_loss += self.hp.lambda_ewc * self.penalty_ewc()
                 if self.hp.lambda_si > 0.0:
@@ -437,25 +434,62 @@ class SACTrainer:
                 actor_loss.backward()
                 self.actor_opt.step()
 
-                # ----------- Alpha update (automatic entropy tuning) -----------
-                entropy = -log_prob  # negative log prob (entropy)
+                entropy = -log_prob
                 alpha_loss = -(self.log_alpha * (entropy + self.target_entropy).detach()).mean()
                 self.alpha_opt.zero_grad()
                 alpha_loss.backward()
                 self.alpha_opt.step()
 
+                # Coleta estatísticas
+                if (step + 1) % 100 == 0:
+                    stat = {
+                        "step": step+1,
+                        "episode": episode_counter,
+                        "replay_buffer_size": len(self.replay_buffer),
+                        "batch_reward_min": r.min().item(),
+                        "batch_reward_max": r.max().item(),
+                        "batch_reward_mean": r.mean().item(),
+                        "batch_action_min": new_action.min().item(),
+                        "batch_action_max": new_action.max().item(),
+                        "batch_action_mean": new_action.mean().item(),
+                        "batch_action_std": new_action.std().item(),
+                        "q1_mean": q1_new.mean().item(),
+                        "q2_mean": q2_new.mean().item(),
+                        "alpha": self.log_alpha.exp().item(),
+                        "actor_loss": actor_loss.item(),
+                        "critic1_loss": critic1_loss.item(),
+                        "critic2_loss": critic2_loss.item(),
+                    }
+                    # Buffer de ações
+                    if len(self.replay_buffer) >= self.batch_size:
+                        buffer_actions = np.array([t[1] for t in self.replay_buffer.buffer if t is not None])
+                        stat["buffer_action_min"] = float(buffer_actions.min())
+                        stat["buffer_action_max"] = float(buffer_actions.max())
+                        stat["buffer_action_mean"] = float(buffer_actions.mean())
+                        stat["buffer_action_std"] = float(buffer_actions.std())
+                    stats_log.append(stat)
+
+                if (step + 1) % 1000 == 0:
+                    # Salva parcialmente a cada 1000 steps
+                    os.makedirs("logs_sac", exist_ok=True)
+                    with open("logs_sac/sac_stats.json", "w") as f:
+                        json.dump(stats_log, f, indent=2)
+
                 # Target update
                 self.update_targets()
 
                 if (step + 1) % steps_per_epoch == 0:
-                    # Validação: execute política determinística e avalie recompensa média
                     val_r = self.evaluate_validation()
-                    pbar.set_postfix({"val_r": f"{val_r:.2f}", "alpha": self.log_alpha.exp().item(), "step": step+1})
-
+                    stats_log[-1]["val_r"] = val_r
                     if val_r > best_val:
                         best_val = val_r
                         self.best_state = self.agent.state_dict()
                         self.best_episode = step+1
+
+        # Salva tudo ao final
+        os.makedirs("logs_sac", exist_ok=True)
+        with open("logs_sac/sac_stats.json", "w") as f:
+            json.dump(stats_log, f, indent=2)
 
         return np.mean(episode_rewards[-100:]), best_val
 
