@@ -1,3 +1,6 @@
+Elastic Weight Consolidation
+
+
 Kirkpatrick, J. et al. "Overcoming catastrophic forgetting in neural networks." PNAS 2017. 
 
 https://www.pnas.org/doi/10.1073/pnas.1611835114

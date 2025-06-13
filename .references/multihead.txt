@@ -1,0 +1,20 @@
+Séries temporais em sistemas energéticos (como o controle de baterias) são altamente autocorrelacionadas: o próximo estado depende não só do atual, mas da trajetória recente.
+
+Redes baseadas em attention (como Transformers) foram desenvolvidas para capturar dependências de longo alcance em sequências.
+
+Multihead attention permite ao modelo aprender vários tipos de dependências temporais simultaneamente (curto, médio, longo prazo).
+
+Em continual learning, capturar padrões temporais estáveis pode ajudar a reduzir o esquecimento catastrófico, pois o modelo aprende "dinâmicas" e não apenas "fotografias" do ambiente.
+
+
+Transformers are suitable for RL:
+
+Janner et al. “Reinforcement Learning as One Big Sequence Modeling Problem,” NeurIPS 2021. (arXiv:2106.02039)
+
+Continual learning com attention:
+
+Ramasesh et al. “Anatomy of Catastrophic Forgetting in Continual Learning” (ICLR 2022) mostra que modelos sequence-based podem mitigar forgetting.
+
+Hybrid attention + EWC:
+
+Modelos de continual learning na literatura, como “Overcoming Catastrophic Forgetting with Attention-Based Memory Networks” (Xu et al., 2018).

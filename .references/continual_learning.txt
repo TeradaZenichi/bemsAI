@@ -131,4 +131,8 @@ A seguir, apresentamos um panorama das principais estratégias de \textit{contin
     A. A. Rusu et al., ``Policy Distillation,'' \textit{ICLR}, 2016.
 \end{thebibliography}
 
+
+
+LER: https://www.sciencedirect.com/science/article/pii/S0306261925001886?ref=pdf_download&fr=RR-2&rr=94d41a24fe0001c6
+
 \end{document}
