@@ -11,8 +11,8 @@ target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(target_path)
 
 from env import EnergyEnvContinuous
-from MHA_PPO_REG.model import PPOAgent
-from MHA_PPO_REG.train import HyperParameters, PPOTrainer
+from MLP_PPO_REG.model import PPOAgent
+from MLP_PPO_REG.train import HyperParameters, PPOTrainer
 
 def load_configs(params_path, model_path, online_path):
     with open(params_path, 'r') as f:
@@ -50,8 +50,11 @@ def save_configs_and_description(save_dir, params, model_cfg, online_cfg, exp_ty
             f.write(f"  {reg}: {model_cfg['agent_params'].get(reg, 0.0)}\n")
         f.write("\nSee config files for more information.\n")
 
-def append_costs_rewards_log(save_dir, train_days, val_days, seq_costs, seq_rewards,
-                            std_costs_mean, std_costs_per_soc, std_rewards_mean, std_rewards_per_soc):
+def append_costs_rewards_log(
+    save_dir, train_days, val_days, seq_costs, seq_rewards,
+    std_costs_mean, std_costs_per_soc, std_rewards_mean, std_rewards_per_soc,
+    std_total_cost, std_total_reward
+):
     log_path = os.path.join(save_dir, "costs_rewards_log.json")
     log = []
     if os.path.exists(log_path):
@@ -60,43 +63,33 @@ def append_costs_rewards_log(save_dir, train_days, val_days, seq_costs, seq_rewa
     entry = {
         "train_days": train_days,
         "val_days": val_days,
-        # Sequencial test
         "sequential_costs": seq_costs,
         "sequential_rewards": seq_rewards,
-        # Standard test
+        # Standard test (all SoCs)
         "standard_costs_mean": std_costs_mean,
         "standard_costs_per_soc": std_costs_per_soc,
         "standard_rewards_mean": std_rewards_mean,
-        "standard_rewards_per_soc": std_rewards_per_soc
+        "standard_rewards_per_soc": std_rewards_per_soc,
+        "standard_total_cost": std_total_cost,
+        "standard_total_reward": std_total_reward
     }
     log.append(entry)
     with open(log_path, "w") as f:
         json.dump(log, f, indent=2)
 
-def run_episode_collect(agent, env, device, soc_init=0.5, n_steps=8):
+def run_episode_collect(agent, env, device, soc_init=0.5):
     state = env.reset(initial_soc=soc_init)
     done = False
     total_energy_cost = 0.0
     total_reward = 0.0
 
-    # For attention: maintain a window of n_steps
-    if isinstance(state, np.ndarray):
-        state_seq = [state.copy()]
-    else:
-        state_seq = [np.array(state)]
     results = {
         'step': [], 'time': [], 'soc': [], 'p_bess': [], 'p_grid': [],
         'p_pv': [], 'p_load': [], 'energy_cost': [], 'reward': []
     }
     t = 0
     while not done:
-        # Build state sequence
-        if len(state_seq) < n_steps:
-            # Pad with copies of the first state if not enough history
-            seq = [state_seq[0]] * (n_steps - len(state_seq)) + state_seq
-        else:
-            seq = state_seq[-n_steps:]
-        st = torch.as_tensor(np.stack(seq), dtype=torch.float32, device=device).unsqueeze(0)  # [1, n_steps, state_dim]
+        st = torch.as_tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         action, _, _ = agent.sample_action(st)
         act_np = action.detach().cpu().numpy() if isinstance(action, torch.Tensor) else action
         nxt, reward, done, info = env.step(act_np)
@@ -111,13 +104,12 @@ def run_episode_collect(agent, env, device, soc_init=0.5, n_steps=8):
         results['p_load'].append(env.load_series.loc[info['time']] * env.Loadmax if hasattr(env, 'load_series') else 0.0)
         results['energy_cost'].append(info.get('energy_cost', 0.0))
         results['reward'].append(reward)
-        state_seq.append(np.array(nxt))
         state = nxt
         t += 1
 
     return total_energy_cost, total_reward, pd.DataFrame(results)
 
-def sequential_test(agent, test_days, hp, device, steps_per_day, soc_init=0.5, n_steps=8):
+def sequential_test(agent, test_days, hp, device, steps_per_day, soc_init=0.5):
     soc = soc_init
     all_costs, all_rewards, dfs = [], [], []
     for idx, d in enumerate(test_days):
@@ -129,7 +121,7 @@ def sequential_test(agent, test_days, hp, device, steps_per_day, soc_init=0.5, n
             observations=hp.obs_keys,
             mode='test'
         )
-        cost, reward, df = run_episode_collect(agent, env, device, soc_init=soc, n_steps=n_steps)
+        cost, reward, df = run_episode_collect(agent, env, device, soc_init=soc)
         df['test_day'] = d
         all_costs.append(cost)
         all_rewards.append(reward)
@@ -139,7 +131,7 @@ def sequential_test(agent, test_days, hp, device, steps_per_day, soc_init=0.5, n
     final_soc = float(soc)
     return all_costs, all_rewards, all_df, final_soc
 
-def standard_test(agent, test_days, hp, device, steps_per_day, soc_values=[0.0, 0.5, 1.0], n_steps=8):
+def standard_test(agent, test_days, hp, device, steps_per_day, soc_values=[0.0, 0.5, 1.0]):
     costs_per_soc = []
     rewards_per_soc = []
     dfs = []
@@ -154,7 +146,7 @@ def standard_test(agent, test_days, hp, device, steps_per_day, soc_values=[0.0, 
                 observations=hp.obs_keys,
                 mode='test'
             )
-            cost, reward, df = run_episode_collect(agent, env, device, soc_init=soc, n_steps=n_steps)
+            cost, reward, df = run_episode_collect(agent, env, device, soc_init=soc)
             df['test_day'] = d
             df['soc_init'] = soc
             soc_costs.append(cost)
@@ -169,21 +161,25 @@ def standard_test(agent, test_days, hp, device, steps_per_day, soc_values=[0.0, 
 
 def main():
     params_path = 'data/parameters.json'
-    model_path = 'MHA_PPO_REG/model.json'
-    online_path = 'MHA_PPO_REG/online_learning.json'
+    model_path = 'MLP_PPO_REG/model.json'
+    online_path = 'MLP_PPO_REG/online_learning.json'
     params, model_cfg, online_cfg = load_configs(params_path, model_path, online_path)
 
     total_days   = online_cfg["total_days"]
     train_window = online_cfg["train_window"]
     val_window   = online_cfg["val_window"]
     num_rollouts = online_cfg.get("num_rollouts", 1000)
-    n_steps      = model_cfg['agent_params'].get("n_steps", 8)
     train_days_list, val_days_list = generate_train_val_windows(total_days, train_window, val_window)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     timestep = params.get('timestep', 5)
     steps_per_day = int(24 * 60 / timestep)
     test_days_length = online_cfg.get("test_days", 30)
     test_month_days = list(range(1, test_days_length + 1))
+
+    # RESUME LOGIC
+    resume_exp_type = online_cfg.get("resume_from_exp_type", None)
+    resume_from_day = online_cfg.get("resume_from_day", None)
+    resume_found = False
 
     for exp_idx, exp in enumerate(online_cfg["experiments"]):
         exp_type   = exp["exp_type"]
@@ -193,13 +189,26 @@ def main():
         model_cfg['agent_params']["lambda_mas"] = exp.get("lambda_mas", 0.0)
         model_cfg['agent_params']["lambda_lwf"] = exp.get("lambda_lwf", 0.0)
 
+        # Resume logic: skip experiments before resume_exp_type
+        if resume_exp_type is not None and resume_from_day is not None and not resume_found:
+            if exp_type != resume_exp_type:
+                print(f"Pulando experimento {exp_type} (antes do resume)...")
+                continue
+            else:
+                resume_found = True  # Começa a processar este exp_type
+
         print(f"\n====== Running experiment: {exp_type} ======\n")
-        save_dir = os.path.join("Results", "MHA", exp_type)
+        save_dir = os.path.join("Results", "PPO_MLP", exp_type)
         save_configs_and_description(save_dir, params, model_cfg, online_cfg, exp_type, exp_idx+1)
 
         last_final_soc = 0.5
 
         for i, (train_days, val_days) in enumerate(zip(train_days_list, val_days_list)):
+            if resume_exp_type is not None and resume_from_day is not None and exp_type == resume_exp_type:
+                if train_days[0] < resume_from_day:
+                    print(f"Pulando janela train_days={train_days} (antes do resume)...")
+                    continue
+
             print(f"--- Step {i+1}: train {train_days} | val {val_days} ---")
             hp = HyperParameters(params_path, model_path)
             hp.lambda_ewc = model_cfg['agent_params']["lambda_ewc"]
@@ -225,17 +234,21 @@ def main():
             # === TEST 1: Test on the first day after val_days, start with last_final_soc ===
             test1_day = val_days[-1] + 1
             seq_costs, seq_rewards, seq_df, final_soc = sequential_test(
-                trainer.agent, [test1_day], hp, device, steps_per_day, soc_init=last_final_soc, n_steps=n_steps
+                trainer.agent, [test1_day], hp, device, steps_per_day, soc_init=last_final_soc
             )
             seq_csv_path = os.path.join(save_dir, f"ppo_seqtest_day{train_days[0]}_all.csv")
             seq_df.to_csv(seq_csv_path, index=False)
 
             # === TEST 2: Standard test ===
             mean_std_cost, std_costs_per_soc, mean_std_reward, std_rewards_per_soc, std_df = standard_test(
-                trainer.agent, test_month_days, hp, device, steps_per_day, n_steps=n_steps
+                trainer.agent, test_month_days, hp, device, steps_per_day
             )
             std_csv_path = os.path.join(save_dir, f"ppo_stdtest_day{train_days[0]}_all.csv")
             std_df.to_csv(std_csv_path, index=False)
+
+            # NOVO: total de custo e reward do teste standard
+            std_total_cost = float(std_df['energy_cost'].sum())
+            std_total_reward = float(std_df['reward'].sum())
 
             # Metrics JSON for this window
             metrics_path = os.path.join(save_dir, f"ppo_metrics_day{train_days[0]}.json")
@@ -256,15 +269,18 @@ def main():
                 "standard_costs_per_soc": std_costs_per_soc,
                 "standard_rewards_mean": mean_std_reward,
                 "standard_rewards_per_soc": std_rewards_per_soc,
-                "standard_csv": std_csv_path
+                "standard_csv": std_csv_path,
+                "standard_total_cost": std_total_cost,
+                "standard_total_reward": std_total_reward
             }
             with open(metrics_path, 'w') as f:
                 json.dump(metrics, f, indent=2)
 
-            # Append incremental log (now with standard test too)
+            # Append incremental log (agora com total)
             append_costs_rewards_log(
                 save_dir, train_days, val_days, seq_costs, seq_rewards,
-                mean_std_cost, std_costs_per_soc, mean_std_reward, std_rewards_per_soc
+                mean_std_cost, std_costs_per_soc, mean_std_reward, std_rewards_per_soc,
+                std_total_cost, std_total_reward
             )
 
             last_final_soc = float(final_soc)

@@ -50,8 +50,11 @@ def save_configs_and_description(save_dir, params, model_cfg, online_cfg, exp_ty
             f.write(f"  {reg}: {model_cfg['agent_params'].get(reg, 0.0)}\n")
         f.write("\nSee config files for more information.\n")
 
-def append_costs_rewards_log(save_dir, train_days, val_days, seq_costs, seq_rewards,
-                            std_costs_mean, std_costs_per_soc, std_rewards_mean, std_rewards_per_soc):
+def append_costs_rewards_log(
+    save_dir, train_days, val_days, seq_costs, seq_rewards,
+    std_costs_mean, std_costs_per_soc, std_rewards_mean, std_rewards_per_soc,
+    std_total_cost, std_total_reward
+):
     log_path = os.path.join(save_dir, "costs_rewards_log.json")
     log = []
     if os.path.exists(log_path):
@@ -60,14 +63,16 @@ def append_costs_rewards_log(save_dir, train_days, val_days, seq_costs, seq_rewa
     entry = {
         "train_days": train_days,
         "val_days": val_days,
-        # Sequencial test
+        # Sequential test
         "sequential_costs": seq_costs,
         "sequential_rewards": seq_rewards,
-        # Standard test
+        # Standard test (all SoCs)
         "standard_costs_mean": std_costs_mean,
         "standard_costs_per_soc": std_costs_per_soc,
         "standard_rewards_mean": std_rewards_mean,
-        "standard_rewards_per_soc": std_rewards_per_soc
+        "standard_rewards_per_soc": std_rewards_per_soc,
+        "standard_total_cost": std_total_cost,
+        "standard_total_reward": std_total_reward
     }
     log.append(entry)
     with open(log_path, "w") as f:
@@ -90,9 +95,7 @@ def run_episode_collect(agent, env, device, soc_init=0.5, n_steps=8):
     }
     t = 0
     while not done:
-        # Build state sequence
         if len(state_seq) < n_steps:
-            # Pad with copies of the first state if not enough history
             seq = [state_seq[0]] * (n_steps - len(state_seq)) + state_seq
         else:
             seq = state_seq[-n_steps:]
@@ -185,6 +188,11 @@ def main():
     test_days_length = online_cfg.get("test_days", 30)
     test_month_days = list(range(1, test_days_length + 1))
 
+    # Resume logic: load resume_from_exp_type and resume_from_day (or None)
+    resume_exp_type = online_cfg.get("resume_from_exp_type", None)
+    resume_from_day = online_cfg.get("resume_from_day", None)
+    resume_found = False  # Will be set to True when the exp_type to resume is found
+
     for exp_idx, exp in enumerate(online_cfg["experiments"]):
         exp_type   = exp["exp_type"]
         # Set the regularization values in the agent_params
@@ -193,13 +201,27 @@ def main():
         model_cfg['agent_params']["lambda_mas"] = exp.get("lambda_mas", 0.0)
         model_cfg['agent_params']["lambda_lwf"] = exp.get("lambda_lwf", 0.0)
 
+        # Resume logic: skip experiments before resume_exp_type
+        if resume_exp_type is not None and resume_from_day is not None and not resume_found:
+            if exp_type != resume_exp_type:
+                print(f"Pulando experimento {exp_type} (antes do resume)...")
+                continue
+            else:
+                resume_found = True  # Começa a processar este exp_type
+
         print(f"\n====== Running experiment: {exp_type} ======\n")
-        save_dir = os.path.join("Results", "MHA", exp_type)
+        save_dir = os.path.join("Results", "PPO_MHA", exp_type)
         save_configs_and_description(save_dir, params, model_cfg, online_cfg, exp_type, exp_idx+1)
 
         last_final_soc = 0.5
 
         for i, (train_days, val_days) in enumerate(zip(train_days_list, val_days_list)):
+            # Resume logic: skip train_days before resume_from_day in the current exp_type
+            if resume_exp_type is not None and resume_from_day is not None and exp_type == resume_exp_type:
+                if train_days[0] < resume_from_day:
+                    print(f"Pulando janela train_days={train_days} (antes do resume)...")
+                    continue
+
             print(f"--- Step {i+1}: train {train_days} | val {val_days} ---")
             hp = HyperParameters(params_path, model_path)
             hp.lambda_ewc = model_cfg['agent_params']["lambda_ewc"]
@@ -237,6 +259,10 @@ def main():
             std_csv_path = os.path.join(save_dir, f"ppo_stdtest_day{train_days[0]}_all.csv")
             std_df.to_csv(std_csv_path, index=False)
 
+            # NOVO: total de custo e reward do teste standard
+            std_total_cost = float(std_df['energy_cost'].sum())
+            std_total_reward = float(std_df['reward'].sum())
+
             # Metrics JSON for this window
             metrics_path = os.path.join(save_dir, f"ppo_metrics_day{train_days[0]}.json")
             metrics = {
@@ -256,15 +282,18 @@ def main():
                 "standard_costs_per_soc": std_costs_per_soc,
                 "standard_rewards_mean": mean_std_reward,
                 "standard_rewards_per_soc": std_rewards_per_soc,
-                "standard_csv": std_csv_path
+                "standard_csv": std_csv_path,
+                "standard_total_cost": std_total_cost,
+                "standard_total_reward": std_total_reward
             }
             with open(metrics_path, 'w') as f:
                 json.dump(metrics, f, indent=2)
 
-            # Append incremental log (now with standard test too)
+            # Append incremental log (agora com total)
             append_costs_rewards_log(
                 save_dir, train_days, val_days, seq_costs, seq_rewards,
-                mean_std_cost, std_costs_per_soc, mean_std_reward, std_rewards_per_soc
+                mean_std_cost, std_costs_per_soc, mean_std_reward, std_rewards_per_soc,
+                std_total_cost, std_total_reward
             )
 
             last_final_soc = float(final_soc)

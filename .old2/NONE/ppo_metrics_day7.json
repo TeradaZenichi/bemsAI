@@ -1,0 +1,69 @@
+{
+  "train_days": [
+    7,
+    8,
+    9
+  ],
+  "val_days": [
+    10,
+    11
+  ],
+  "t_r": -0.043056263881726946,
+  "v_r": -26.208424772132915,
+  "sequential_test_days": [
+    12
+  ],
+  "sequential_costs": [
+    7.258830716780479
+  ],
+  "sequential_rewards": [
+    -24.650547473395815
+  ],
+  "sequential_csv": "Results\\MHA\\NONE\\ppo_seqtest_day7_all.csv",
+  "sequential_final_soc": 0.1,
+  "standard_test_days": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30
+  ],
+  "standard_costs_mean": 4.101411517959851,
+  "standard_costs_per_soc": [
+    4.774217933600792,
+    4.148945770896185,
+    3.3810708493825725
+  ],
+  "standard_rewards_mean": -4.465930534092966,
+  "standard_rewards_per_soc": [
+    -5.136168571339738,
+    -4.514083544680017,
+    -3.747539486259144
+  ],
+  "standard_csv": "Results\\MHA\\NONE\\ppo_stdtest_day7_all.csv"
+}
