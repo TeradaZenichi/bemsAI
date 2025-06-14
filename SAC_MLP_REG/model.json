@@ -25,7 +25,7 @@
   },
   "seed": 42,
   "start_idx": 0,
-  "max_updates": 50000,
+  "max_updates": 10000,
   "checkpoint_freq": 10,
   "observations": [
     "pv", "load", "soc", "tariff",
@@ -36,12 +36,13 @@
     "weekday"
   ],
   "agent_params": {
+    "num_episodes": 1000,
     "gamma": 0.99,
     "alpha": 0.7,                      
     "actor_lr": 0.0003,
-    "critic_lr": 0.001,
+    "critic_lr": 0.0001,
     "alpha_lr": 0.0001,                 
-    "tau": 0.005,                      
+    "tau": 0.01,                      
     "batch_size": 256,
     "hidden_size": 128,
     "hidden_layers": 5,

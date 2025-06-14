@@ -4,18 +4,16 @@ import json
 import torch
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+from tqdm import trange
 import torch.nn.functional as F
+import pandas as pd
+from tqdm import tqdm
 
-
-# Adjust for project root
 target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(target_path)
-
 from env import EnergyEnvContinuous
 from SAC_MLP_REG.model import SACAgent
 
-# Simple replay buffer for off-policy RL
 class ReplayBuffer:
     def __init__(self, capacity=1_000_000):
         self.capacity = capacity
@@ -52,8 +50,8 @@ class HyperParameters:
             model_cfg = json.load(f)
         agent_cfg = model_cfg['agent_params']
         self.seed            = model_cfg.get('seed', 42)
-        self.max_updates     = model_cfg.get('max_updates', 1000)
-        self.checkpoint_freq = model_cfg.get('checkpoint_freq', 50)
+        self.num_episodes    = agent_cfg.get('num_episodes', 200)
+        self.max_steps       = agent_cfg.get('max_steps', 864)
         self.batch_size      = agent_cfg.get('batch_size', 256)
         self.gamma           = agent_cfg.get('gamma', 0.99)
         self.tau             = agent_cfg.get('tau', 0.005)
@@ -64,16 +62,13 @@ class HyperParameters:
         self.target_entropy  = agent_cfg.get('target_entropy', -1.0)
         self.hidden_size     = agent_cfg.get('hidden_size', 128)
         self.hidden_layers   = agent_cfg.get('hidden_layers', 2)
-        self.lambda_ewc      = agent_cfg.get('lambda_ewc', 0.0)
-        self.lambda_si       = agent_cfg.get('lambda_si', 0.0)
-        self.lambda_mas      = agent_cfg.get('lambda_mas', 0.0)
-        self.lambda_lwf      = agent_cfg.get('lambda_lwf', 0.0)
         self.data_dir        = 'data'
         self.obs_keys        = model_cfg['observations']
         self.p_max           = params['BESS']['Pmax_c']
         self.p_min           = -params['BESS']['Pmax_d']
         self.timestep        = params.get('timestep', 5)
-        self.buffer_capacity = agent_cfg.get('buffer_capacity', 1_000_000)
+        self.num_episodes    = agent_cfg.get('num_episodes', 1000)
+        self.buffer_capacity = agent_cfg.get('buffer_capacity', 5000)
         random.seed(self.seed)
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)
@@ -81,74 +76,12 @@ class HyperParameters:
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
 
-def load_configs(params_path, model_path, online_path):
-    with open(params_path, 'r') as f:
-        params = json.load(f)
-    with open(model_path, 'r') as f:
-        model_cfg = json.load(f)
-    with open(online_path, 'r') as f:
-        online = json.load(f)
-    return params, model_cfg, online
-
-def generate_train_val_windows(total_days, train_window, val_window):
-    train_days_list, val_days_list = [], []
-    for i in range(0, total_days - train_window - val_window + 2):
-        train_days = list(range(i+1, i+1+train_window))
-        val_days = list(range(i+1+train_window, i+1+train_window+val_window))
-        if train_days[-1] <= total_days and val_days[-1] <= total_days:
-            train_days_list.append(train_days)
-            val_days_list.append(val_days)
-    return train_days_list, val_days_list
-
-def save_configs_and_description(save_dir, params, model_cfg, online_cfg, exp_type, exp_idx):
-    os.makedirs(save_dir, exist_ok=True)
-    with open(os.path.join(save_dir, "parameters.json"), 'w') as f:
-        json.dump(params, f, indent=2)
-    with open(os.path.join(save_dir, "model.json"), 'w') as f:
-        json.dump(model_cfg, f, indent=2)
-    with open(os.path.join(save_dir, "online_learning.json"), 'w') as f:
-        json.dump(online_cfg, f, indent=2)
-    desc_path = os.path.join(save_dir, "README.txt")
-    with open(desc_path, "w") as f:
-        f.write(f"Experiment {exp_idx}: {exp_type}\n")
-        f.write("Regularization values:\n")
-        for reg in ["lambda_ewc", "lambda_si", "lambda_mas", "lambda_lwf"]:
-            f.write(f"  {reg}: {model_cfg['agent_params'].get(reg, 0.0)}\n")
-        f.write("\nSee config files for more information.\n")
-
-def append_costs_rewards_log(save_dir, train_days, val_days, seq_costs, seq_rewards,
-                            std_costs_mean, std_costs_per_soc, std_rewards_mean, std_rewards_per_soc):
-    log_path = os.path.join(save_dir, "costs_rewards_log.json")
-    log = []
-    if os.path.exists(log_path):
-        with open(log_path, "r") as f:
-            log = json.load(f)
-    entry = {
-        "train_days": train_days,
-        "val_days": val_days,
-        # Sequencial test
-        "sequential_costs": seq_costs,
-        "sequential_rewards": seq_rewards,
-        # Standard test
-        "standard_costs_mean": std_costs_mean,
-        "standard_costs_per_soc": std_costs_per_soc,
-        "standard_rewards_mean": std_rewards_mean,
-        "standard_rewards_per_soc": std_rewards_per_soc
-    }
-    log.append(entry)
-    with open(log_path, "w") as f:
-        json.dump(log, f, indent=2)
-
 def run_episode_collect(agent, env, device, soc_init=0.5, deterministic=True):
     state = env.reset(initial_soc=soc_init)
     done = False
     total_energy_cost = 0.0
     total_reward = 0.0
-    results = {
-        'step': [], 'time': [], 'soc': [], 'p_bess': [], 'p_grid': [],
-        'p_pv': [], 'p_load': [], 'energy_cost': [], 'reward': []
-    }
-    t = 0
+    steps = 0
     while not done:
         st = torch.as_tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         if deterministic:
@@ -159,91 +92,17 @@ def run_episode_collect(agent, env, device, soc_init=0.5, deterministic=True):
         nxt, reward, done, info = env.step(act_np)
         total_energy_cost += info.get('energy_cost', 0.0)
         total_reward += reward
-        results['step'].append(t)
-        results['time'].append(info.get('time', t))
-        results['soc'].append(env.soc)
-        results['p_bess'].append(info.get('p_bess', 0.0))
-        results['p_grid'].append(info.get('p_grid', 0.0))
-        results['p_pv'].append(env.pv_series.loc[info['time']] * env.PVmax if hasattr(env, 'pv_series') else 0.0)
-        results['p_load'].append(env.load_series.loc[info['time']] * env.Loadmax if hasattr(env, 'load_series') else 0.0)
-        results['energy_cost'].append(info.get('energy_cost', 0.0))
-        results['reward'].append(reward)
         state = nxt
-        t += 1
-    return total_energy_cost, total_reward, pd.DataFrame(results)
-
-def sequential_test(agent, test_days, hp, device, steps_per_day, soc_init=0.5):
-    soc = soc_init
-    all_costs, all_rewards, dfs = [], [], []
-    for idx, d in enumerate(test_days):
-        env = EnergyEnvContinuous(
-            data_dir=hp.data_dir,
-            dataset='train',
-            start_idx=(d-1)*steps_per_day,
-            episode_length=steps_per_day,
-            observations=hp.obs_keys,
-            mode='test'
-        )
-        cost, reward, df = run_episode_collect(agent, env, device, soc_init=soc, deterministic=True)
-        df['test_day'] = d
-        all_costs.append(cost)
-        all_rewards.append(reward)
-        dfs.append(df)
-        soc = env.soc
-    all_df = pd.concat(dfs, ignore_index=True)
-    final_soc = float(soc)
-    return all_costs, all_rewards, all_df, final_soc
-
-def standard_test(agent, test_days, hp, device, steps_per_day, soc_values=[0.0, 0.5, 1.0]):
-    costs_per_soc = []
-    rewards_per_soc = []
-    dfs = []
-    for soc in soc_values:
-        soc_costs, soc_rewards = [], []
-        for d in test_days:
-            env = EnergyEnvContinuous(
-                data_dir=hp.data_dir,
-                dataset='test',
-                start_idx=(d-1)*steps_per_day,
-                episode_length=steps_per_day,
-                observations=hp.obs_keys,
-                mode='test'
-            )
-            cost, reward, df = run_episode_collect(agent, env, device, soc_init=soc, deterministic=True)
-            df['test_day'] = d
-            df['soc_init'] = soc
-            soc_costs.append(cost)
-            soc_rewards.append(reward)
-            dfs.append(df)
-        costs_per_soc.append(np.mean(soc_costs))
-        rewards_per_soc.append(np.mean(soc_rewards))
-    mean_cost = np.mean(costs_per_soc)
-    mean_reward = np.mean(rewards_per_soc)
-    all_df = pd.concat(dfs, ignore_index=True)
-    return mean_cost, costs_per_soc, mean_reward, rewards_per_soc, all_df
-
+        steps += 1
+    return total_energy_cost, total_reward, steps, env.soc
 
 class SACTrainer:
-    def __init__(self, hp, train_days=None, val_days=None, device=None, buffer_capacity=1000,
-                 regularization_state=None,
-                 fisher=None, prev_params_ewc=None,
-                 omega_si=None, prev_params_si=None,
-                 omega_mas=None, prev_params_mas=None,
-                 teacher=None):
+    def __init__(self, hp, train_days=None, val_days=None, device=None):
         self.hp = hp
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.batch_size = hp.batch_size
         self.gamma = hp.gamma
         self.tau = hp.tau
-        self.buffer_capacity = hp.buffer_capacity
-
-        self.fisher = fisher
-        self.prev_params_ewc = prev_params_ewc
-        self.omega_si = omega_si
-        self.prev_params_si = prev_params_si
-        self.omega_mas = omega_mas
-        self.prev_params_mas = prev_params_mas
-        self.teacher = teacher
 
         self.steps_per_day = int(24 * 60 / hp.timestep)
         self.env = EnergyEnvContinuous(
@@ -274,7 +133,6 @@ class SACTrainer:
             hidden_layers=hp.hidden_layers
         ).to(self.device)
 
-        # Target networks
         self.target_critic_1 = SACAgent(
             state_dim=state_dim,
             action_dim=action_dim,
@@ -297,80 +155,87 @@ class SACTrainer:
         self.actor_opt = torch.optim.Adam(self.agent.actor.parameters(), lr=hp.actor_lr)
         self.critic_1_opt = torch.optim.Adam(self.agent.critic_1.parameters(), lr=hp.critic_lr)
         self.critic_2_opt = torch.optim.Adam(self.agent.critic_2.parameters(), lr=hp.critic_lr)
-        # ----------- Entropy (Alpha) tuning -----------
         self.log_alpha = torch.tensor(np.log(hp.alpha), requires_grad=True, device=self.device)
         self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=hp.alpha_lr)
-        self.target_entropy = hp.target_entropy  # ex: -1.0 para ação escalar
+        self.target_entropy = hp.target_entropy
 
-        self.replay_buffer = ReplayBuffer(self.buffer_capacity)
+        self.replay_buffer = ReplayBuffer(hp.buffer_capacity)
         self.best_state = None
 
-    # === REGULARIZATION PENALTIES ===
-    def penalty_ewc(self):
-        if self.fisher is None or self.prev_params_ewc is None:
-            return 0.0
-        loss = 0.0
-        for n, p in self.agent.actor.named_parameters():
-            if n in self.prev_params_ewc:
-                loss += (self.fisher[n] * (p - self.prev_params_ewc[n]).pow(2)).sum()
-        return loss
-
-    def penalty_si(self):
-        if self.omega_si is None or self.prev_params_si is None:
-            return 0.0
-        loss = 0.0
-        for n, p in self.agent.actor.named_parameters():
-            if n in self.prev_params_si:
-                loss += (self.omega_si[n] * (p - self.prev_params_si[n]).pow(2)).sum()
-        return loss
-
-    def penalty_mas(self):
-        if self.omega_mas is None or self.prev_params_mas is None:
-            return 0.0
-        loss = 0.0
-        for n, p in self.agent.actor.named_parameters():
-            if n in self.prev_params_mas:
-                loss += (self.omega_mas[n] * (p - self.prev_params_mas[n]).pow(2)).sum()
-        return loss
-
-    def penalty_lwf(self, states):
-        if self.teacher is None:
-            return 0.0
-        with torch.no_grad():
-            target_mu, _ = self.teacher.actor(states)
-        mu, _ = self.agent.actor(states)
-        return F.mse_loss(mu, target_mu)
-
     def update_targets(self):
-        # Polyak averaging of target critics
         for param, target_param in zip(self.agent.critic_1.parameters(), self.target_critic_1.parameters()):
             target_param.data.copy_(self.hp.tau * param.data + (1 - self.hp.tau) * target_param.data)
         for param, target_param in zip(self.agent.critic_2.parameters(), self.target_critic_2.parameters()):
             target_param.data.copy_(self.hp.tau * param.data + (1 - self.hp.tau) * target_param.data)
 
-    def train_and_validate(self, steps_per_epoch=1000):
+    def sac_update(self):
+        if len(self.replay_buffer) < self.batch_size:
+            return np.nan, np.nan, np.nan
+        s, a, r, ns, d = self.replay_buffer.sample(self.batch_size)
+        s = s.to(self.device); a = a.to(self.device); r = r.to(self.device)
+        ns = ns.to(self.device); d = d.to(self.device)
+        if a.dim() == 1:
+            a = a.unsqueeze(-1)
+        alpha = self.log_alpha.exp()
+        with torch.no_grad():
+            next_action, next_log_prob, _ = self.agent.sample_action(ns)
+            next_action = torch.clamp(next_action, self.hp.p_min, self.hp.p_max)
+            target_q1 = self.target_critic_1(ns, next_action)
+            target_q2 = self.target_critic_2(ns, next_action)
+            target_q = torch.min(target_q1, target_q2) - alpha * next_log_prob
+            target = r + self.hp.gamma * (1 - d) * target_q
+
+        current_q1 = self.agent.critic_1(s, a)
+        current_q2 = self.agent.critic_2(s, a)
+        critic1_loss = F.mse_loss(current_q1, target)
+        critic2_loss = F.mse_loss(current_q2, target)
+        self.critic_1_opt.zero_grad()
+        critic1_loss.backward()
+        self.critic_1_opt.step()
+        self.critic_2_opt.zero_grad()
+        critic2_loss.backward()
+        self.critic_2_opt.step()
+
+        new_action, log_prob, _ = self.agent.sample_action(s)
+        q1_new, q2_new = self.agent.critic_1(s, new_action), self.agent.critic_2(s, new_action)
+        q_new = torch.min(q1_new, q2_new)
+        actor_loss = (alpha * log_prob - q_new).mean()
+        self.actor_opt.zero_grad()
+        actor_loss.backward()
+        self.actor_opt.step()
+
+        entropy = -log_prob
+        alpha_loss = -(self.log_alpha * (entropy + self.target_entropy).detach()).mean()
+        self.alpha_opt.zero_grad()
+        alpha_loss.backward()
+        self.alpha_opt.step()
+
+        self.update_targets()
+        return actor_loss.item(), critic1_loss.item(), critic2_loss.item()
+
+    def train_and_validate(self):
+        episode_logs = []
         best_val = -float('inf')
         self.best_episode = 0
 
-        obs_dim = len(self.hp.obs_keys)
-        action_dim = 1
+        patience_counter = 0
+        patience = 20
+        min_delta = 1e-3
+        patience_active = False
+        best_val_tracked = -float('inf')
 
-        num_steps = self.hp.max_updates
-        min_buffer_size = max(self.batch_size * 2, 1000)
-        state = self.env.reset()
-        done = False
+        t_r = 0.0
+        v_r = 0.0
+        diff = 1.0  # Se não tiver curriculum, pode manter fixo
 
-        total_steps = 0
-        episode_reward = 0.0
-        episode_rewards = []
-        episode_counter = 0
+        for episode in tqdm(range(self.hp.num_episodes), desc="Episodes (train)"):
 
-        stats_log = []  # Aqui serão salvas as estatísticas
+            state = self.env.reset()
+            done = False
+            episode_reward = 0.0
+            steps = 0
 
-        print(f"Target entropy: {self.target_entropy}")
-
-        with tqdm(range(num_steps), desc="SAC training", leave=False) as pbar:
-            for step in pbar:
+            while not done and steps < self.hp.max_steps:
                 st = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
                 action, _, _ = self.agent.sample_action(st)
                 act_np = action.detach().cpu().numpy() if isinstance(action, torch.Tensor) else action
@@ -378,193 +243,99 @@ class SACTrainer:
                 self.replay_buffer.push(state, act_np.squeeze(), reward, next_state, float(done))
                 episode_reward += reward
                 state = next_state
-                total_steps += 1
+                steps += 1
 
-                # If done, reset episode
-                if done:
-                    episode_rewards.append(episode_reward)
-                    episode_reward = 0.0
-                    state = self.env.reset()
-                    done = False
-                    episode_counter += 1
+            # Atualização do SAC após cada episódio
+            actor_loss, critic1_loss, critic2_loss = self.sac_update()
 
-                if len(self.replay_buffer) < min_buffer_size:
-                    continue
-
+            # Logs/statísticas para análise
+            buffer_actions = np.array([t[1] for t in self.replay_buffer.buffer if t is not None])
+            buffer_diversity = float(buffer_actions.std()) if len(buffer_actions) > 0 else np.nan
+            last_alpha = self.log_alpha.exp().item()
+            q1q2_mean = np.nan
+            if len(self.replay_buffer) >= self.batch_size:
                 s, a, r, ns, d = self.replay_buffer.sample(self.batch_size)
-                s = s.to(self.device); a = a.to(self.device); r = r.to(self.device)
-                ns = ns.to(self.device); d = d.to(self.device)
-                if a.dim() == 1:
-                    a = a.unsqueeze(-1)
-                alpha = self.log_alpha.exp()
-                with torch.no_grad():
-                    next_action, next_log_prob, _ = self.agent.sample_action(ns)
-                    next_action = torch.clamp(next_action, self.hp.p_min, self.hp.p_max)
-                    target_q1 = self.target_critic_1(ns, next_action)
-                    target_q2 = self.target_critic_2(ns, next_action)
-                    target_q = torch.min(target_q1, target_q2) - alpha * next_log_prob
-                    target = r + self.hp.gamma * (1 - d) * target_q
+                q1_new = self.agent.critic_1(s.to(self.device), a.to(self.device))
+                q2_new = self.agent.critic_2(s.to(self.device), a.to(self.device))
+                q1q2_mean = np.mean([q1_new.mean().item(), q2_new.mean().item()])
 
-                current_q1 = self.agent.critic_1(s, a)
-                current_q2 = self.agent.critic_2(s, a)
-                critic1_loss = F.mse_loss(current_q1, target)
-                critic2_loss = F.mse_loss(current_q2, target)
-                self.critic_1_opt.zero_grad()
-                critic1_loss.backward()
-                self.critic_1_opt.step()
-                self.critic_2_opt.zero_grad()
-                critic2_loss.backward()
-                self.critic_2_opt.step()
+            episode_logs.append({
+                "episode": episode+1,
+                "reward": episode_reward,
+                "steps": steps,
+                "last_soc": self.env.soc,
+                "final_alpha": last_alpha,
+                "buffer_action_std": buffer_diversity,
+                "q1q2_mean": q1q2_mean
+            })
 
-                new_action, log_prob, _ = self.agent.sample_action(s)
-                q1_new, q2_new = self.agent.critic_1(s, new_action), self.agent.critic_2(s, new_action)
-                q_new = torch.min(q1_new, q2_new)
-                actor_loss = (alpha * log_prob - q_new).mean()
+            # --- Estatísticas para barra de progresso ---
+            last_100 = episode_logs[-100:] if len(episode_logs) >= 100 else episode_logs
+            t_r = np.mean([ep["reward"] for ep in last_100])
 
-                if self.hp.lambda_ewc > 0.0:
-                    actor_loss += self.hp.lambda_ewc * self.penalty_ewc()
-                if self.hp.lambda_si > 0.0:
-                    actor_loss += self.hp.lambda_si * self.penalty_si()
-                if self.hp.lambda_mas > 0.0:
-                    actor_loss += self.hp.lambda_mas * self.penalty_mas()
-                if self.hp.lambda_lwf > 0.0:
-                    actor_loss += self.hp.lambda_lwf * self.penalty_lwf(s)
+            # v_r pode ser calculado a cada N episódios, ex: a cada 5 episódios
+            v_r = self.evaluate_validation() if (episode+1) % 5 == 0 else np.nan
 
-                self.actor_opt.zero_grad()
-                actor_loss.backward()
-                self.actor_opt.step()
+            # Early stopping (pode adaptar, ou remover se não usar)
+            if v_r is not np.nan:
+                if not patience_active:
+                    patience_active = True
+                    best_val_tracked = v_r
+                    patience_counter = 0
+                if v_r > best_val_tracked + min_delta:
+                    best_val_tracked = v_r
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                if v_r > best_val:
+                    best_val = v_r
+                    self.best_state = self.agent.state_dict()
+                    self.best_episode = episode+1
 
-                entropy = -log_prob
-                alpha_loss = -(self.log_alpha * (entropy + self.target_entropy).detach()).mean()
-                self.alpha_opt.zero_grad()
-                alpha_loss.backward()
-                self.alpha_opt.step()
+            # Atualiza barra de progresso (tqdm)
+            tqdm.write(f"Episode {episode+1}: t_r={t_r:.2f} v_r={v_r:.2f}")
+            tqdm._instances.clear()  # (Evita sobreposição de prints)
+            tqdm.get_last_print().set_postfix({
+                "t_r": f"{t_r:.2f}",
+                "v_r": f"{v_r:.2f}",
+                "idx0": self.env.start_idx,
+                "dif": f"{diff:.2f}",
+                "b_ep": self.best_episode,
+                "b_val": f"{best_val:.2f}",
+                "entropy": f"{last_alpha:.5f}",
+                "pat": patience_counter if patience_active else "-"
+            })
 
-                # Coleta estatísticas
-                if (step + 1) % 100 == 0:
-                    stat = {
-                        "step": step+1,
-                        "episode": episode_counter,
-                        "replay_buffer_size": len(self.replay_buffer),
-                        "batch_reward_min": r.min().item(),
-                        "batch_reward_max": r.max().item(),
-                        "batch_reward_mean": r.mean().item(),
-                        "batch_action_min": new_action.min().item(),
-                        "batch_action_max": new_action.max().item(),
-                        "batch_action_mean": new_action.mean().item(),
-                        "batch_action_std": new_action.std().item(),
-                        "q1_mean": q1_new.mean().item(),
-                        "q2_mean": q2_new.mean().item(),
-                        "alpha": self.log_alpha.exp().item(),
-                        "actor_loss": actor_loss.item(),
-                        "critic1_loss": critic1_loss.item(),
-                        "critic2_loss": critic2_loss.item(),
-                    }
-                    # Buffer de ações
-                    if len(self.replay_buffer) >= self.batch_size:
-                        buffer_actions = np.array([t[1] for t in self.replay_buffer.buffer if t is not None])
-                        stat["buffer_action_min"] = float(buffer_actions.min())
-                        stat["buffer_action_max"] = float(buffer_actions.max())
-                        stat["buffer_action_mean"] = float(buffer_actions.mean())
-                        stat["buffer_action_std"] = float(buffer_actions.std())
-                    stats_log.append(stat)
-
-                if (step + 1) % 1000 == 0:
-                    # Salva parcialmente a cada 1000 steps
-                    os.makedirs("logs_sac", exist_ok=True)
-                    with open("logs_sac/sac_stats.json", "w") as f:
-                        json.dump(stats_log, f, indent=2)
-
-                # Target update
-                self.update_targets()
-
-                if (step + 1) % steps_per_epoch == 0:
-                    val_r = self.evaluate_validation()
-                    stats_log[-1]["val_r"] = val_r
-                    if val_r > best_val:
-                        best_val = val_r
-                        self.best_state = self.agent.state_dict()
-                        self.best_episode = step+1
-
-        # Salva tudo ao final
+        # Salva resultados
         os.makedirs("logs_sac", exist_ok=True)
-        with open("logs_sac/sac_stats.json", "w") as f:
-            json.dump(stats_log, f, indent=2)
+        pd.DataFrame(episode_logs).to_csv("logs_sac/sac_episodes.csv", index=False)
 
-        return np.mean(episode_rewards[-100:]), best_val
+        last_ep_rewards = [ep["reward"] for ep in episode_logs[-100:]] if len(episode_logs) >= 100 else [ep["reward"] for ep in episode_logs]
+        return np.mean(last_ep_rewards), best_val
+
 
     def evaluate_validation(self):
-        # Roda avaliação determinística no eval_env, retornando média de reward
         soc_init_list = [0.1, 0.5, 0.9]
         all_rewards = []
         for soc in soc_init_list:
-            _, v_r, _ = run_episode_collect(self.agent, self.eval_env, self.device, soc_init=soc, deterministic=True)
+            _, v_r, _, _ = run_episode_collect(self.agent, self.eval_env, self.device, soc_init=soc, deterministic=True)
             all_rewards.append(v_r)
         return float(np.mean(all_rewards))
 
-
-
-# ========================= MAIN ==========================
-
-import os
-import torch
-import matplotlib.pyplot as plt
-
-
-def run_episode_for_plot(env, agent, device, deterministic=True):
-    obs_dim = env.observation_space.shape[0]
-    max_steps = getattr(env, 'episode_length', 1000)
-    state = env.reset()
-    done = False
-    t = 0
-    p_bess, p_grid, p_pv, p_load, socs, times = [], [], [], [], [], []
-    with torch.no_grad():
-        while not done and t < max_steps:
-            st = torch.as_tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-            if deterministic:
-                action = agent.act(st)
-            else:
-                action, _, _ = agent.sample_action(st)
-            act_np = action.detach().cpu().numpy() if isinstance(action, torch.Tensor) else action
-            nxt, _, done, info = env.step(act_np)
-            state = nxt
-            socs.append(env.soc)
-            times.append(info.get('time', t))
-            p_bess.append(info.get('p_bess', 0.0))
-            p_grid.append(info.get('p_grid', 0.0))
-            p_pv.append(env.pv_series.loc[info['time']] * env.PVmax if hasattr(env, 'pv_series') else 0.0)
-            p_load.append(env.load_series.loc[info['time']] * env.Loadmax if hasattr(env, 'load_series') else 0.0)
-            t += 1
-    return {
-        'times': times,
-        'soc': socs,
-        'p_bess': p_bess,
-        'p_grid': p_grid,
-        'p_pv': p_pv,
-        'p_load': p_load
-    }
-
 if __name__ == "__main__":
     param_path = 'data/parameters.json'
-    model_path = 'SAC_MLP_REG/model.json'      # Novo path!
+    model_path = 'SAC_MLP_REG/model.json'
     save_dir = "models/sac"
     os.makedirs(save_dir, exist_ok=True)
 
-    # Carregar hiperparâmetros
     hp = HyperParameters(param_path, model_path)
     train_days = [1, 2, 3]
     val_days = [4, 5]
 
-    # --- Para LwF: snapshot do teacher antes de treinar (Exemplo para o 1º ciclo)
-    teacher = None
-
     trainer = SACTrainer(
         hp,
         train_days=train_days,
-        val_days=val_days,
-        # Adicione os argumentos de regularização se necessário
-        teacher=teacher
-        # fisher, prev_params_ewc, omega_si, prev_params_si, omega_mas, prev_params_mas...
+        val_days=val_days
     )
 
     t_r, v_r = trainer.train_and_validate()
@@ -578,8 +349,9 @@ if __name__ == "__main__":
         print(f"Model saved at: {save_path}")
 
     # Rodar avaliação e plotar resultados (determinístico)
-    val_plot = run_episode_for_plot(trainer.eval_env, trainer.agent, trainer.device, deterministic=True)
-    x = range(len(val_plot['times']))
+    val_plot = run_episode_collect(trainer.agent, trainer.eval_env, trainer.device, deterministic=True)[2]
+    x = range(len(val_plot['step']))
+    import matplotlib.pyplot as plt
     plt.figure(figsize=(12, 6))
     plt.subplot(2, 1, 1)
     plt.bar(x, val_plot['p_bess'], width=0.6, label='BESS')
@@ -596,4 +368,3 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig('sac_val_episode_output.png')
     plt.show()
-

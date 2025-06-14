@@ -188,26 +188,23 @@ def main():
     test_days_length = online_cfg.get("test_days", 30)
     test_month_days = list(range(1, test_days_length + 1))
 
-    # Resume logic: load resume_from_exp_type and resume_from_day (or None)
     resume_exp_type = online_cfg.get("resume_from_exp_type", None)
     resume_from_day = online_cfg.get("resume_from_day", None)
-    resume_found = False  # Will be set to True when the exp_type to resume is found
+    resume_found = False
 
     for exp_idx, exp in enumerate(online_cfg["experiments"]):
         exp_type   = exp["exp_type"]
-        # Set the regularization values in the agent_params
         model_cfg['agent_params']["lambda_ewc"] = exp.get("lambda_ewc", 0.0)
         model_cfg['agent_params']["lambda_si"]  = exp.get("lambda_si", 0.0)
         model_cfg['agent_params']["lambda_mas"] = exp.get("lambda_mas", 0.0)
         model_cfg['agent_params']["lambda_lwf"] = exp.get("lambda_lwf", 0.0)
 
-        # Resume logic: skip experiments before resume_exp_type
         if resume_exp_type is not None and resume_from_day is not None and not resume_found:
             if exp_type != resume_exp_type:
                 print(f"Pulando experimento {exp_type} (antes do resume)...")
                 continue
             else:
-                resume_found = True  # Começa a processar este exp_type
+                resume_found = True
 
         print(f"\n====== Running experiment: {exp_type} ======\n")
         save_dir = os.path.join("Results", "PPO_MHA", exp_type)
@@ -216,7 +213,6 @@ def main():
         last_final_soc = 0.5
 
         for i, (train_days, val_days) in enumerate(zip(train_days_list, val_days_list)):
-            # Resume logic: skip train_days before resume_from_day in the current exp_type
             if resume_exp_type is not None and resume_from_day is not None and exp_type == resume_exp_type:
                 if train_days[0] < resume_from_day:
                     print(f"Pulando janela train_days={train_days} (antes do resume)...")
@@ -235,16 +231,60 @@ def main():
                 val_days=val_days,
                 num_rollouts=num_rollouts
             )
+
+            # === Carregamento incremental ===
+            prev_day = train_days[0] - 1
+            loaded_prev = False
+            if prev_day >= 1:
+                prev_ckpt_path = os.path.join(save_dir, f"ppo_best_model_day{prev_day}.pt")
+                if os.path.exists(prev_ckpt_path):
+                    try:
+                        state_dict = torch.load(prev_ckpt_path, map_location=device)
+                        # Pesos do agente
+                        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+                            trainer.agent.load_state_dict(state_dict['model_state_dict'])
+                        else:
+                            trainer.agent.load_state_dict(state_dict)
+                        # Buffers de regularização
+                        if isinstance(state_dict, dict):
+                            if 'fisher' in state_dict and hasattr(trainer.agent, 'fisher'):
+                                trainer.agent.fisher = state_dict['fisher']
+                                print("   > Buffer 'fisher' carregado.")
+                            if 'omega' in state_dict and hasattr(trainer.agent, 'omega'):
+                                trainer.agent.omega = state_dict['omega']
+                                print("   > Buffer 'omega' carregado.")
+                            if 'mas_importance' in state_dict and hasattr(trainer.agent, 'mas_importance'):
+                                trainer.agent.mas_importance = state_dict['mas_importance']
+                                print("   > Buffer 'mas_importance' carregado.")
+                            if 'lwf_old_params' in state_dict and hasattr(trainer.agent, 'lwf_old_params'):
+                                trainer.agent.lwf_old_params = state_dict['lwf_old_params']
+                                print("   > Buffer 'lwf_old_params' carregado.")
+                        print(f">>> Pesos e buffers carregados do dia {prev_day} com sucesso.")
+                        loaded_prev = True
+                    except Exception as e:
+                        print(f"!!! Erro ao carregar modelo/buffers do dia {prev_day}: {e}")
+            if not loaded_prev:
+                if prev_day >= 1:
+                    print(f"!!! Modelo/buffers do dia {prev_day} não encontrado ou não pôde ser carregado. Inicializando agente do zero.")
+
             t_r, v_r = trainer.train_and_validate()
 
-            # Save checkpoint/model weights
-            ckpt_path = os.path.join(save_dir, f"ppo_best_model_day{train_days[0]}.pt")
-            if trainer.best_state is not None:
-                torch.save(trainer.best_state, ckpt_path)
-            else:
-                torch.save(trainer.agent.state_dict(), ckpt_path)
+            # === Salvamento do checkpoint com buffers ===
+            ckpt = {'model_state_dict': trainer.agent.state_dict()}
+            if hasattr(trainer.agent, 'fisher'):
+                ckpt['fisher'] = trainer.agent.fisher
+            if hasattr(trainer.agent, 'omega'):
+                ckpt['omega'] = trainer.agent.omega
+            if hasattr(trainer.agent, 'mas_importance'):
+                ckpt['mas_importance'] = trainer.agent.mas_importance
+            if hasattr(trainer.agent, 'lwf_old_params'):
+                ckpt['lwf_old_params'] = trainer.agent.lwf_old_params
+            # ... Adicione mais buffers se necessário
 
-            # === TEST 1: Test on the first day after val_days, start with last_final_soc ===
+            ckpt_path = os.path.join(save_dir, f"ppo_best_model_day{train_days[0]}.pt")
+            torch.save(ckpt, ckpt_path)
+
+            # === TEST 1: Sequential ===
             test1_day = val_days[-1] + 1
             seq_costs, seq_rewards, seq_df, final_soc = sequential_test(
                 trainer.agent, [test1_day], hp, device, steps_per_day, soc_init=last_final_soc, n_steps=n_steps
@@ -252,31 +292,27 @@ def main():
             seq_csv_path = os.path.join(save_dir, f"ppo_seqtest_day{train_days[0]}_all.csv")
             seq_df.to_csv(seq_csv_path, index=False)
 
-            # === TEST 2: Standard test ===
+            # === TEST 2: Standard ===
             mean_std_cost, std_costs_per_soc, mean_std_reward, std_rewards_per_soc, std_df = standard_test(
                 trainer.agent, test_month_days, hp, device, steps_per_day, n_steps=n_steps
             )
             std_csv_path = os.path.join(save_dir, f"ppo_stdtest_day{train_days[0]}_all.csv")
             std_df.to_csv(std_csv_path, index=False)
 
-            # NOVO: total de custo e reward do teste standard
             std_total_cost = float(std_df['energy_cost'].sum())
             std_total_reward = float(std_df['reward'].sum())
 
-            # Metrics JSON for this window
             metrics_path = os.path.join(save_dir, f"ppo_metrics_day{train_days[0]}.json")
             metrics = {
                 "train_days": train_days,
                 "val_days": val_days,
                 "t_r": t_r,
                 "v_r": v_r,
-                # Sequential test metrics
                 "sequential_test_days": [test1_day],
                 "sequential_costs": seq_costs,
                 "sequential_rewards": seq_rewards,
                 "sequential_csv": seq_csv_path,
                 "sequential_final_soc": float(final_soc),
-                # Standard test metrics
                 "standard_test_days": test_month_days,
                 "standard_costs_mean": mean_std_cost,
                 "standard_costs_per_soc": std_costs_per_soc,
@@ -289,7 +325,6 @@ def main():
             with open(metrics_path, 'w') as f:
                 json.dump(metrics, f, indent=2)
 
-            # Append incremental log (agora com total)
             append_costs_rewards_log(
                 save_dir, train_days, val_days, seq_costs, seq_rewards,
                 mean_std_cost, std_costs_per_soc, mean_std_reward, std_rewards_per_soc,
@@ -297,6 +332,9 @@ def main():
             )
 
             last_final_soc = float(final_soc)
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()

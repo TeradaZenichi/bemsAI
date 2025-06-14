@@ -25,7 +25,20 @@ class Actor(nn.Module):
         x = self.hidden(state)
         mu = torch.tanh(self.mu_head(x)) * self.p_max
         log_std = self.log_std_head(x)
-        sigma = torch.exp(log_std).clamp(min=1e-6, max=1.0)
+
+        # >>>>>>>>>> Debug block START <<<<<<<<<<
+        if torch.isnan(mu).any() or torch.isinf(mu).any():
+            print("!! [DEBUG] NaN/Inf in mu:", mu.cpu().detach().numpy())
+        if torch.isnan(log_std).any() or torch.isinf(log_std).any():
+            print("!! [DEBUG] NaN/Inf in log_std (before clamp):", log_std.cpu().detach().numpy())
+        # >>>>>>>>>> Debug block END <<<<<<<<<<
+
+        log_std = torch.clamp(log_std, min=-5, max=2)
+        sigma = torch.exp(log_std)
+         # >>>>>>>>>> Debug block for sigma <<<<<<<<<<
+        if torch.isnan(sigma).any() or torch.isinf(sigma).any():
+            print("!! [DEBUG] NaN/Inf in sigma:", sigma.cpu().detach().numpy())
+        # >>>>>>>>>> Debug block END <<<<<<<<<<
         return mu, sigma
 
     def select_action(self, state):
@@ -68,6 +81,8 @@ class Critic(nn.Module):
         action: Tensor [batch, action_dim]
         Returns Q-value: Tensor [batch, 1]
         """
+        if action.dim() == 1:
+            action = action.unsqueeze(-1)
         x = torch.cat([state, action], dim=-1)
         x = self.hidden(x)
         return self.value(x)

@@ -222,14 +222,69 @@ def main():
                 val_days=val_days,
                 num_rollouts=num_rollouts
             )
+
+            # === NOVO: carregar pesos e buffers do melhor modelo do dia anterior ===
+            prev_day = train_days[0] - 1
+            loaded_prev = False
+            if prev_day >= 1:
+                prev_ckpt_path = os.path.join(save_dir, f"ppo_best_model_day{prev_day}.pt")
+                if os.path.exists(prev_ckpt_path):
+                    try:
+                        state_dict = torch.load(prev_ckpt_path, map_location=device)
+                        # Carrega pesos
+                        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+                            trainer.agent.load_state_dict(state_dict['model_state_dict'])
+                        else:
+                            trainer.agent.load_state_dict(state_dict)
+                        # Carrega buffers de regularização se existirem
+                        # EWC
+                        if isinstance(state_dict, dict) and 'fisher' in state_dict:
+                            if hasattr(trainer.agent, 'fisher'):
+                                trainer.agent.fisher = state_dict['fisher']
+                                print("   > Buffer 'fisher' carregado.")
+                        # SI
+                        if isinstance(state_dict, dict) and 'omega' in state_dict:
+                            if hasattr(trainer.agent, 'omega'):
+                                trainer.agent.omega = state_dict['omega']
+                                print("   > Buffer 'omega' carregado.")
+                        # MAS
+                        if isinstance(state_dict, dict) and 'mas_importance' in state_dict:
+                            if hasattr(trainer.agent, 'mas_importance'):
+                                trainer.agent.mas_importance = state_dict['mas_importance']
+                                print("   > Buffer 'mas_importance' carregado.")
+                        # LwF (parâmetros antigos)
+                        if isinstance(state_dict, dict) and 'lwf_old_params' in state_dict:
+                            if hasattr(trainer.agent, 'lwf_old_params'):
+                                trainer.agent.lwf_old_params = state_dict['lwf_old_params']
+                                print("   > Buffer 'lwf_old_params' carregado.")
+                        # Outros buffers podem ser adicionados aqui...
+                        print(f">>> Pesos e buffers carregados do dia {prev_day} com sucesso.")
+                        loaded_prev = True
+                    except Exception as e:
+                        print(f"!!! Erro ao carregar modelo/buffers do dia {prev_day}: {e}")
+            if not loaded_prev:
+                if prev_day >= 1:
+                    print(f"!!! Modelo/buffers do dia {prev_day} não encontrado ou não pôde ser carregado. Inicializando agente do zero.")
+
+            # === Treinamento e validação ===
             t_r, v_r = trainer.train_and_validate()
 
-            # Save checkpoint/model weights
+            # === SALVAMENTO: inclui pesos E buffers de regularização ===
+            ckpt = {
+                'model_state_dict': trainer.agent.state_dict()
+            }
+            if hasattr(trainer.agent, 'fisher'):
+                ckpt['fisher'] = trainer.agent.fisher
+            if hasattr(trainer.agent, 'omega'):
+                ckpt['omega'] = trainer.agent.omega
+            if hasattr(trainer.agent, 'mas_importance'):
+                ckpt['mas_importance'] = trainer.agent.mas_importance
+            if hasattr(trainer.agent, 'lwf_old_params'):
+                ckpt['lwf_old_params'] = trainer.agent.lwf_old_params
+            # Adicione outros buffers conforme necessário
+
             ckpt_path = os.path.join(save_dir, f"ppo_best_model_day{train_days[0]}.pt")
-            if trainer.best_state is not None:
-                torch.save(trainer.best_state, ckpt_path)
-            else:
-                torch.save(trainer.agent.state_dict(), ckpt_path)
+            torch.save(ckpt, ckpt_path)
 
             # === TEST 1: Test on the first day after val_days, start with last_final_soc ===
             test1_day = val_days[-1] + 1
@@ -284,6 +339,7 @@ def main():
             )
 
             last_final_soc = float(final_soc)
+
 
 if __name__ == "__main__":
     main()
