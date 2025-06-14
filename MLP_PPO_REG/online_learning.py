@@ -236,28 +236,34 @@ def main():
                             trainer.agent.load_state_dict(state_dict['model_state_dict'])
                         else:
                             trainer.agent.load_state_dict(state_dict)
-                        # Carrega buffers de regularização se existirem
-                        # EWC
+                        # Carrega buffers de regularização se existirem (no AGENTE)
                         if isinstance(state_dict, dict) and 'fisher' in state_dict:
                             if hasattr(trainer.agent, 'fisher'):
                                 trainer.agent.fisher = state_dict['fisher']
                                 print("   > Buffer 'fisher' carregado.")
-                        # SI
                         if isinstance(state_dict, dict) and 'omega' in state_dict:
                             if hasattr(trainer.agent, 'omega'):
                                 trainer.agent.omega = state_dict['omega']
                                 print("   > Buffer 'omega' carregado.")
-                        # MAS
                         if isinstance(state_dict, dict) and 'mas_importance' in state_dict:
                             if hasattr(trainer.agent, 'mas_importance'):
                                 trainer.agent.mas_importance = state_dict['mas_importance']
                                 print("   > Buffer 'mas_importance' carregado.")
-                        # LwF (parâmetros antigos)
                         if isinstance(state_dict, dict) and 'lwf_old_params' in state_dict:
                             if hasattr(trainer.agent, 'lwf_old_params'):
                                 trainer.agent.lwf_old_params = state_dict['lwf_old_params']
                                 print("   > Buffer 'lwf_old_params' carregado.")
-                        # Outros buffers podem ser adicionados aqui...
+
+                        # NOVO: agora também garantir no PPOTrainer
+                        if hasattr(trainer.agent, 'fisher'):
+                            trainer.fisher = trainer.agent.fisher
+                        if hasattr(trainer.agent, 'omega'):
+                            trainer.omega_si = trainer.agent.omega
+                        if hasattr(trainer.agent, 'mas_importance'):
+                            trainer.omega_mas = trainer.agent.mas_importance
+                        if hasattr(trainer.agent, 'lwf_old_params'):
+                            trainer.teacher = trainer.agent.lwf_old_params  # Se usar LwF assim
+
                         print(f">>> Pesos e buffers carregados do dia {prev_day} com sucesso.")
                         loaded_prev = True
                     except Exception as e:
@@ -339,7 +345,6 @@ def main():
             )
 
             last_final_soc = float(final_soc)
-
 
 if __name__ == "__main__":
     main()
