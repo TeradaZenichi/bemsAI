@@ -115,7 +115,7 @@ def sequential_test(agent, test_days, hp, device, steps_per_day, soc_init=0.5):
     for idx, d in enumerate(test_days):
         env = EnergyEnvContinuous(
             data_dir=hp.data_dir,
-            dataset='test',
+            dataset='train',
             start_idx=(d-1)*steps_per_day,
             episode_length=steps_per_day,
             observations=hp.obs_keys,
