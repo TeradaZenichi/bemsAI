@@ -1,61 +1,27 @@
 {
-  "_comments": {
-    "observations": "List of input features for the SAC agent.",
-    "agent_params": {
-      "gamma": "Discount factor for SAC.",
-      "alpha": "Initial temperature parameter for entropy regularization (automatic entropy tuning if specified).",
-      "actor_lr": "Learning rate for the actor network.",
-      "critic_lr": "Learning rate for the critic networks.",
-      "alpha_lr": "Learning rate for the temperature/entropy parameter (if automatic tuning enabled).",
-      "tau": "Soft update coefficient for target networks.",
-      "batch_size": "Batch size for SAC updates.",
-      "hidden_size": "Number of neurons in each hidden layer.",
-      "hidden_layers": "Number of hidden layers in the networks.",
-      "lambda_ewc": "EWC regularization strength (set to 0.0 to disable EWC).",
-      "lambda_si": "Synaptic Intelligence (SI) regularization strength (set to 0.0 to disable SI).",
-      "epsilon_si": "Stability parameter for SI (must be > 0 if SI is active; ignored if SI is disabled).",
-      "lambda_mas": "MAS regularization strength (set to 0.0 to disable MAS).",
-      "lambda_lwf": "LwF (Learning without Forgetting) regularization strength (set to 0.0 to disable LwF).",
-      "lambda_wd": "Weight decay (L2 regularization) strength (set to 0.0 to disable L2 regularization).",
-      "early_stopping_patience": "Number of updates with no improvement before early stopping.",
-      "min_delta": "Minimum reward improvement to reset early stopping patience."
-    },
-    "log_dir": "Directory for experiment logs.",
-    "model_dir": "Directory where trained model weights are saved."
-  },
-  "seed": 42,
-  "start_idx": 0,
-  "max_updates": 10000,
-  "checkpoint_freq": 10,
-  "observations": [
-    "pv", "load", "soc", "tariff",
-    "peds_max", "peds_min", "pmax", "pmin",
-    "hour_sin", "hour_cos",
-    "day_sin", "day_cos",
-    "month_sin", "month_cos",
-    "weekday"
-  ],
+  "observations": ["pv", "load", "soc", "tariff", "pmax", "pmin"],
   "agent_params": {
-    "num_episodes": 1000,
-    "gamma": 0.99,
-    "alpha": 0.7,                      
-    "actor_lr": 0.0003,
-    "critic_lr": 0.0001,
-    "alpha_lr": 0.0001,                 
-    "tau": 0.01,                      
+    "n_layers": 2,
+    "hidden_size": 256,
+    "actor_lr": 3e-4,
+    "critic_lr": 3e-4,
+    "alpha_lr": 3e-4,
     "batch_size": 256,
-    "hidden_size": 128,
-    "hidden_layers": 5,
-    "lambda_ewc": 100.0,                
-    "lambda_si": 1.0,                   
-    "epsilon_si": 0.1,                  
-    "lambda_mas": 1.0,                  
-    "lambda_lwf": 1.0,                  
-    "lambda_wd": 0.0001,               
-    "early_stopping_patience": 200,
-    "min_delta": 0.01,
-    "buffer_capacity": 1000
+    "gamma": 0.99,
+    "tau": 0.005,
+    "init_alpha": 0.2,
+    "target_entropy": -1,
+    "replay_size": 1000000,
+    "reward_scale": 1.0,
+    "max_grad_norm": 10.0,
+    "log_std_min": -20,
+    "log_std_max": 2
   },
-  "log_dir": "logs",
-  "model_dir": "models/sac_reg"
+  "training": {
+    "episodes": 500,
+    "steps_per_episode": 288,
+    "eval_freq": 10,
+    "seed": 42,
+    "device": "cuda"
+  }
 }
