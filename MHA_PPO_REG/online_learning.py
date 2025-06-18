@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import copy
 
 # Allow imports from the project root directory
 target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -212,6 +213,15 @@ def main():
 
         last_final_soc = 0.5
 
+        # --------- INICIALIZAÇÃO DOS BUFFERS PARA CONTINUAL LEARNING ----------
+        prev_fisher = None
+        prev_params_ewc = None
+        prev_omega_si = None
+        prev_params_si = None
+        prev_omega_mas = None
+        prev_params_mas = None
+        prev_teacher = None
+
         for i, (train_days, val_days) in enumerate(zip(train_days_list, val_days_list)):
             if resume_exp_type is not None and resume_from_day is not None and exp_type == resume_exp_type:
                 if train_days[0] < resume_from_day:
@@ -229,7 +239,14 @@ def main():
                 hp,
                 train_days=train_days,
                 val_days=val_days,
-                num_rollouts=num_rollouts
+                num_rollouts=num_rollouts,
+                fisher=prev_fisher,
+                prev_params_ewc=prev_params_ewc,
+                omega_si=prev_omega_si,
+                prev_params_si=prev_params_si,
+                omega_mas=prev_omega_mas,
+                prev_params_mas=prev_params_mas,
+                teacher=prev_teacher
             )
 
             # === Carregamento incremental ===
@@ -272,6 +289,20 @@ def main():
 
                         print(f">>> Pesos e buffers carregados do dia {prev_day} com sucesso.")
                         loaded_prev = True
+                        
+                        # ------------- ATUALIZE OS BUFFERS GLOBAIS PARA O PRÓXIMO CICLO -------------
+                        if 'fisher' in state_dict:
+                            prev_fisher = state_dict['fisher']
+                        if 'model_state_dict' in state_dict:
+                            prev_params_ewc = {k: v.clone() for k, v in state_dict['model_state_dict'].items()}
+                        if 'omega' in state_dict:
+                            prev_omega_si = state_dict['omega']
+                        if 'mas_importance' in state_dict:
+                            prev_omega_mas = state_dict['mas_importance']
+                        if 'lwf_old_params' in state_dict:
+                            prev_teacher = state_dict['lwf_old_params']
+                        # --------------------------------------------------------------------------  # <-- ALTERADO
+
                     except Exception as e:
                         print(f"!!! Erro ao carregar modelo/buffers do dia {prev_day}: {e}")
             if not loaded_prev:
@@ -279,6 +310,21 @@ def main():
                     print(f"!!! Modelo/buffers do dia {prev_day} não encontrado ou não pôde ser carregado. Inicializando agente do zero.")
 
             t_r, v_r = trainer.train_and_validate()
+
+            # ---------- ATUALIZE OS BUFFERS PARA A PRÓXIMA JANELA ----------
+            if hp.lambda_ewc > 0.0:
+                prev_fisher = trainer.compute_fisher_information()
+                prev_params_ewc = trainer.get_params_snapshot()
+            if hp.lambda_si > 0.0:
+                # prev_omega_si = trainer.compute_si_importance()
+                # prev_params_si = trainer.get_params_snapshot()
+                pass  # Implemente SI se necessário
+            if hp.lambda_mas > 0.0:
+                # prev_omega_mas = trainer.compute_mas_importance()
+                # prev_params_mas = trainer.get_params_snapshot()
+                pass  # Implemente MAS se necessário
+            if hp.lambda_lwf > 0.0:
+                prev_teacher = copy.deepcopy(trainer.agent)
 
             # === Salvamento do checkpoint com buffers ===
             ckpt = {'model_state_dict': trainer.agent.state_dict()}
@@ -346,5 +392,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

@@ -283,6 +283,30 @@ class PPOTrainer:
                 loss.backward()
                 self.actor_opt.step()
                 self.critic_opt.step()
+    
+    def get_params_snapshot(self):
+        # Returns a dictionary with the current parameters of the agent, for EWC, SI, MAS etc.
+        return {n: p.clone().detach() for n, p in self.agent.named_parameters()}
+
+    def compute_fisher_information(self, n_samples=256):
+        fisher = {}
+        for n, p in self.agent.named_parameters():
+            fisher[n] = torch.zeros_like(p)
+
+        self.agent.eval()
+        states, actions, old_lps, _, _, _ = self.collect_rollout_buffer(n_samples)
+        mu, sigma = self.agent.actor(states)
+        dist = Normal(mu, sigma)
+        log_probs = dist.log_prob(actions).sum(-1)
+        log_probs = log_probs.mean()
+        self.agent.zero_grad()
+        log_probs.backward(retain_graph=True)
+        for n, p in self.agent.named_parameters():
+            if p.grad is not None:
+                fisher[n] = p.grad.detach() ** 2
+        self.agent.train()
+        return fisher
+
 
     def evaluate_validation(self):
         soc_init_list = [0.1, 0.5, 0.9]

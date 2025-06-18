@@ -5,8 +5,8 @@ import torch
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import copy
 
-# Allow imports from the project root directory
 target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(target_path)
 
@@ -41,7 +41,6 @@ def save_configs_and_description(save_dir, params, model_cfg, online_cfg, exp_ty
         json.dump(model_cfg, f, indent=2)
     with open(os.path.join(save_dir, "online_learning.json"), 'w') as f:
         json.dump(online_cfg, f, indent=2)
-    # Save a txt description
     desc_path = os.path.join(save_dir, "README.txt")
     with open(desc_path, "w") as f:
         f.write(f"Experiment {exp_idx}: {exp_type}\n")
@@ -65,7 +64,6 @@ def append_costs_rewards_log(
         "val_days": val_days,
         "sequential_costs": seq_costs,
         "sequential_rewards": seq_rewards,
-        # Standard test (all SoCs)
         "standard_costs_mean": std_costs_mean,
         "standard_costs_per_soc": std_costs_per_soc,
         "standard_rewards_mean": std_rewards_mean,
@@ -176,32 +174,38 @@ def main():
     test_days_length = online_cfg.get("test_days", 30)
     test_month_days = list(range(1, test_days_length + 1))
 
-    # RESUME LOGIC
     resume_exp_type = online_cfg.get("resume_from_exp_type", None)
     resume_from_day = online_cfg.get("resume_from_day", None)
     resume_found = False
 
     for exp_idx, exp in enumerate(online_cfg["experiments"]):
         exp_type   = exp["exp_type"]
-        # Set the regularization values in the agent_params
         model_cfg['agent_params']["lambda_ewc"] = exp.get("lambda_ewc", 0.0)
         model_cfg['agent_params']["lambda_si"]  = exp.get("lambda_si", 0.0)
         model_cfg['agent_params']["lambda_mas"] = exp.get("lambda_mas", 0.0)
         model_cfg['agent_params']["lambda_lwf"] = exp.get("lambda_lwf", 0.0)
 
-        # Resume logic: skip experiments before resume_exp_type
         if resume_exp_type is not None and resume_from_day is not None and not resume_found:
             if exp_type != resume_exp_type:
                 print(f"Pulando experimento {exp_type} (antes do resume)...")
                 continue
             else:
-                resume_found = True  # Começa a processar este exp_type
+                resume_found = True
 
         print(f"\n====== Running experiment: {exp_type} ======\n")
         save_dir = os.path.join("Results", "PPO_MLP", exp_type)
         save_configs_and_description(save_dir, params, model_cfg, online_cfg, exp_type, exp_idx+1)
 
         last_final_soc = 0.5
+
+        # --------- INICIALIZAÇÃO DOS BUFFERS PARA CONTINUAL LEARNING ----------
+        prev_fisher = None
+        prev_params_ewc = None
+        prev_omega_si = None
+        prev_params_si = None
+        prev_omega_mas = None
+        prev_params_mas = None
+        prev_teacher = None
 
         for i, (train_days, val_days) in enumerate(zip(train_days_list, val_days_list)):
             if resume_exp_type is not None and resume_from_day is not None and exp_type == resume_exp_type:
@@ -220,10 +224,16 @@ def main():
                 hp,
                 train_days=train_days,
                 val_days=val_days,
-                num_rollouts=num_rollouts
+                num_rollouts=num_rollouts,
+                fisher=prev_fisher,
+                prev_params_ewc=prev_params_ewc,
+                omega_si=prev_omega_si,
+                prev_params_si=prev_params_si,
+                omega_mas=prev_omega_mas,
+                prev_params_mas=prev_params_mas,
+                teacher=prev_teacher
             )
 
-            # === NOVO: carregar pesos e buffers do melhor modelo do dia anterior ===
             prev_day = train_days[0] - 1
             loaded_prev = False
             if prev_day >= 1:
@@ -231,30 +241,24 @@ def main():
                 if os.path.exists(prev_ckpt_path):
                     try:
                         state_dict = torch.load(prev_ckpt_path, map_location=device)
-                        # Carrega pesos
                         if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
                             trainer.agent.load_state_dict(state_dict['model_state_dict'])
                         else:
                             trainer.agent.load_state_dict(state_dict)
-                        # Carrega buffers de regularização se existirem (no AGENTE)
-                        if isinstance(state_dict, dict) and 'fisher' in state_dict:
-                            if hasattr(trainer.agent, 'fisher'):
+                        if isinstance(state_dict, dict):
+                            if 'fisher' in state_dict and hasattr(trainer.agent, 'fisher'):
                                 trainer.agent.fisher = state_dict['fisher']
                                 print("   > Buffer 'fisher' carregado.")
-                        if isinstance(state_dict, dict) and 'omega' in state_dict:
-                            if hasattr(trainer.agent, 'omega'):
+                            if 'omega' in state_dict and hasattr(trainer.agent, 'omega'):
                                 trainer.agent.omega = state_dict['omega']
                                 print("   > Buffer 'omega' carregado.")
-                        if isinstance(state_dict, dict) and 'mas_importance' in state_dict:
-                            if hasattr(trainer.agent, 'mas_importance'):
+                            if 'mas_importance' in state_dict and hasattr(trainer.agent, 'mas_importance'):
                                 trainer.agent.mas_importance = state_dict['mas_importance']
                                 print("   > Buffer 'mas_importance' carregado.")
-                        if isinstance(state_dict, dict) and 'lwf_old_params' in state_dict:
-                            if hasattr(trainer.agent, 'lwf_old_params'):
+                            if 'lwf_old_params' in state_dict and hasattr(trainer.agent, 'lwf_old_params'):
                                 trainer.agent.lwf_old_params = state_dict['lwf_old_params']
                                 print("   > Buffer 'lwf_old_params' carregado.")
 
-                        # NOVO: agora também garantir no PPOTrainer
                         if hasattr(trainer.agent, 'fisher'):
                             trainer.fisher = trainer.agent.fisher
                         if hasattr(trainer.agent, 'omega'):
@@ -262,7 +266,20 @@ def main():
                         if hasattr(trainer.agent, 'mas_importance'):
                             trainer.omega_mas = trainer.agent.mas_importance
                         if hasattr(trainer.agent, 'lwf_old_params'):
-                            trainer.teacher = trainer.agent.lwf_old_params  # Se usar LwF assim
+                            trainer.teacher = trainer.agent.lwf_old_params
+
+                        # ---------- ATUALIZE OS BUFFERS GLOBAIS PARA O PRÓXIMO CICLO ----------
+                        if 'fisher' in state_dict:
+                            prev_fisher = state_dict['fisher']
+                        if 'model_state_dict' in state_dict:
+                            prev_params_ewc = {k: v.clone() for k, v in state_dict['model_state_dict'].items()}
+                        if 'omega' in state_dict:
+                            prev_omega_si = state_dict['omega']
+                        if 'mas_importance' in state_dict:
+                            prev_omega_mas = state_dict['mas_importance']
+                        if 'lwf_old_params' in state_dict:
+                            prev_teacher = state_dict['lwf_old_params']
+                        # ---------------------------------------------------------------------
 
                         print(f">>> Pesos e buffers carregados do dia {prev_day} com sucesso.")
                         loaded_prev = True
@@ -272,13 +289,24 @@ def main():
                 if prev_day >= 1:
                     print(f"!!! Modelo/buffers do dia {prev_day} não encontrado ou não pôde ser carregado. Inicializando agente do zero.")
 
-            # === Treinamento e validação ===
             t_r, v_r = trainer.train_and_validate()
 
-            # === SALVAMENTO: inclui pesos E buffers de regularização ===
-            ckpt = {
-                'model_state_dict': trainer.agent.state_dict()
-            }
+            # ---------- ATUALIZE OS BUFFERS PARA A PRÓXIMA JANELA ----------
+            if hp.lambda_ewc > 0.0:
+                prev_fisher = trainer.compute_fisher_information()
+                prev_params_ewc = trainer.get_params_snapshot()
+            if hp.lambda_si > 0.0:
+                # prev_omega_si = trainer.compute_si_importance()
+                # prev_params_si = trainer.get_params_snapshot()
+                pass
+            if hp.lambda_mas > 0.0:
+                # prev_omega_mas = trainer.compute_mas_importance()
+                # prev_params_mas = trainer.get_params_snapshot()
+                pass
+            if hp.lambda_lwf > 0.0:
+                prev_teacher = copy.deepcopy(trainer.agent)
+
+            ckpt = {'model_state_dict': trainer.agent.state_dict()}
             if hasattr(trainer.agent, 'fisher'):
                 ckpt['fisher'] = trainer.agent.fisher
             if hasattr(trainer.agent, 'omega'):
@@ -287,12 +315,10 @@ def main():
                 ckpt['mas_importance'] = trainer.agent.mas_importance
             if hasattr(trainer.agent, 'lwf_old_params'):
                 ckpt['lwf_old_params'] = trainer.agent.lwf_old_params
-            # Adicione outros buffers conforme necessário
 
             ckpt_path = os.path.join(save_dir, f"ppo_best_model_day{train_days[0]}.pt")
             torch.save(ckpt, ckpt_path)
 
-            # === TEST 1: Test on the first day after val_days, start with last_final_soc ===
             test1_day = val_days[-1] + 1
             seq_costs, seq_rewards, seq_df, final_soc = sequential_test(
                 trainer.agent, [test1_day], hp, device, steps_per_day, soc_init=last_final_soc
@@ -300,31 +326,26 @@ def main():
             seq_csv_path = os.path.join(save_dir, f"ppo_seqtest_day{train_days[0]}_all.csv")
             seq_df.to_csv(seq_csv_path, index=False)
 
-            # === TEST 2: Standard test ===
             mean_std_cost, std_costs_per_soc, mean_std_reward, std_rewards_per_soc, std_df = standard_test(
                 trainer.agent, test_month_days, hp, device, steps_per_day
             )
             std_csv_path = os.path.join(save_dir, f"ppo_stdtest_day{train_days[0]}_all.csv")
             std_df.to_csv(std_csv_path, index=False)
 
-            # NOVO: total de custo e reward do teste standard
             std_total_cost = float(std_df['energy_cost'].sum())
             std_total_reward = float(std_df['reward'].sum())
 
-            # Metrics JSON for this window
             metrics_path = os.path.join(save_dir, f"ppo_metrics_day{train_days[0]}.json")
             metrics = {
                 "train_days": train_days,
                 "val_days": val_days,
                 "t_r": t_r,
                 "v_r": v_r,
-                # Sequential test metrics
                 "sequential_test_days": [test1_day],
                 "sequential_costs": seq_costs,
                 "sequential_rewards": seq_rewards,
                 "sequential_csv": seq_csv_path,
                 "sequential_final_soc": float(final_soc),
-                # Standard test metrics
                 "standard_test_days": test_month_days,
                 "standard_costs_mean": mean_std_cost,
                 "standard_costs_per_soc": std_costs_per_soc,
@@ -337,7 +358,6 @@ def main():
             with open(metrics_path, 'w') as f:
                 json.dump(metrics, f, indent=2)
 
-            # Append incremental log (agora com total)
             append_costs_rewards_log(
                 save_dir, train_days, val_days, seq_costs, seq_rewards,
                 mean_std_cost, std_costs_per_soc, mean_std_reward, std_rewards_per_soc,

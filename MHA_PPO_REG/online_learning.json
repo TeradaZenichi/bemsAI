@@ -7,7 +7,48 @@
   "resume_from_exp_type": null,
   "resume_from_day": null,
   "experiments": [
-
+    {
+      "exp_type": "NONE",
+      "lambda_ewc": 0.0,
+      "lambda_si": 0.0,
+      "lambda_mas": 0.0,
+      "lambda_lwf": 0.0
+    },
+    {
+      "exp_type": "EWC",
+      "lambda_ewc": 100.0,
+      "lambda_si": 0.0,
+      "lambda_mas": 0.0,
+      "lambda_lwf": 0.0
+    },
+    {
+      "exp_type": "SI",
+      "lambda_ewc": 0.0,
+      "lambda_si": 1.0,
+      "lambda_mas": 0.0,
+      "lambda_lwf": 0.0
+    },
+    {
+      "exp_type": "MAS",
+      "lambda_ewc": 0.0,
+      "lambda_si": 0.0,
+      "lambda_mas": 1.0,
+      "lambda_lwf": 0.0
+    },
+    {
+      "exp_type": "LWF",
+      "lambda_ewc": 0.0,
+      "lambda_si": 0.0,
+      "lambda_mas": 0.0,
+      "lambda_lwf": 1.0
+    },
+    {
+      "exp_type": "EWC_SI",
+      "lambda_ewc": 100.0,
+      "lambda_si": 1.0,
+      "lambda_mas": 0.0,
+      "lambda_lwf": 0.0
+    },
     {
       "exp_type": "EWC_MAS",
       "lambda_ewc": 100.0,

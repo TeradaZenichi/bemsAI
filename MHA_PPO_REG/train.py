@@ -351,6 +351,33 @@ class PPOTrainer:
             {'times': times, 'soc': socs, 'p_bess': p_bess, 'p_grid': p_grid, 'p_pv': p_pv, 'p_load': p_load}
         )
 
+    def get_params_snapshot(self):
+        # This method is used to get a snapshot of the agent's parameters for regularization methods like EWC, SI, MAS
+        return {n: p.clone().detach() for n, p in self.agent.named_parameters()}
+
+
+
+    def compute_fisher_information(self, dataloader=None, n_samples=256):
+        # Simple calculation of diagonal Fisher information based on log-probability gradients of the policy.
+        fisher = {}
+        for n, p in self.agent.named_parameters():
+            fisher[n] = torch.zeros_like(p)
+
+        self.agent.eval()
+        states, actions, old_lps, _, _, _ = self.collect_rollout_buffer(n_samples)
+        mu, sigma = self.agent.actor(states)
+        dist = torch.distributions.Normal(mu, sigma)
+        log_probs = dist.log_prob(actions).sum(-1)
+        log_probs = log_probs.mean()  
+        self.agent.zero_grad()
+        log_probs.backward(retain_graph=True)
+        for n, p in self.agent.named_parameters():
+            if p.grad is not None:
+                fisher[n] = p.grad.detach() ** 2
+        self.agent.train()
+        return fisher
+
+
     def train_and_validate(self):
         total_r = 0.0
         best_val = -float('inf')

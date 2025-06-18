@@ -20,8 +20,20 @@
   "training": {
     "episodes": 500,
     "steps_per_episode": 288,
-    "eval_freq": 10,
+    "eval_freq": 1,
     "seed": 42,
-    "device": "cuda"
+    "device": "cuda",
+    "patience": 20,
+    "min_delta": 1e-3,
+    "train_days": [1, 2, 3],
+    "val_days": [4, 5],
+    "data_dir": "data",
+    "train_dataset": "train",
+    "train_episode_length": 288,
+    "train_mode": "train",
+    "val_dataset": "train",
+    "val_episode_length": 288,
+    "val_mode": "test"
   }
+
 }
