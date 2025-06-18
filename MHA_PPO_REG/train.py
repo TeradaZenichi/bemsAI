@@ -377,6 +377,38 @@ class PPOTrainer:
         self.agent.train()
         return fisher
 
+    def compute_si_importance(self, n_samples=256):
+        omega = {}
+        self.agent.eval()
+        states, actions, old_lps, _, _, _ = self.collect_rollout_buffer(n_samples)
+        values = self.agent.critic(states).view(-1)
+        value_mean = values.mean()
+        self.agent.zero_grad()
+        value_mean.backward(retain_graph=True)
+        for n, p in self.agent.named_parameters():
+            if p.grad is not None:
+                omega[n] = p.grad.detach().abs()  # pode ser outro cálculo no SI real
+            else:
+                omega[n] = torch.zeros_like(p)
+        self.agent.train()
+        return omega
+
+    def compute_mas_importance(self, n_samples=256):
+        omega = {}
+        self.agent.eval()
+        states, actions, old_lps, _, _, _ = self.collect_rollout_buffer(n_samples)
+        actor_outputs, _ = self.agent.actor(states)
+        output_sum = actor_outputs.sum()
+        self.agent.zero_grad()
+        output_sum.backward(retain_graph=True)
+        for n, p in self.agent.named_parameters():
+            if p.grad is not None:
+                omega[n] = p.grad.detach().abs()
+            else:
+                omega[n] = torch.zeros_like(p)
+        self.agent.train()
+        return omega
+
 
     def train_and_validate(self):
         total_r = 0.0

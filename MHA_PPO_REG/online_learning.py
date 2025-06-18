@@ -316,13 +316,11 @@ def main():
                 prev_fisher = trainer.compute_fisher_information()
                 prev_params_ewc = trainer.get_params_snapshot()
             if hp.lambda_si > 0.0:
-                # prev_omega_si = trainer.compute_si_importance()
-                # prev_params_si = trainer.get_params_snapshot()
-                pass  # Implemente SI se necessário
+                prev_omega_si = trainer.compute_si_importance()
+                prev_params_si = trainer.get_params_snapshot()
             if hp.lambda_mas > 0.0:
-                # prev_omega_mas = trainer.compute_mas_importance()
-                # prev_params_mas = trainer.get_params_snapshot()
-                pass  # Implemente MAS se necessário
+                prev_omega_mas = trainer.compute_mas_importance()
+                prev_params_mas = trainer.get_params_snapshot()
             if hp.lambda_lwf > 0.0:
                 prev_teacher = copy.deepcopy(trainer.agent)
 
