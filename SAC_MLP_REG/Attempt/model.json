@@ -13,10 +13,16 @@
     "batch_size": 256,
     "gamma": 0.99,
     "tau": 0.005,
+    "init_alpha": 1.0,
+    "target_entropy": -1.0,
     "replay_size": 1000000,
     "log_std_min": -20,
     "log_std_max": 2,
-    "target_entropy_delta": 0.05
+    "alpha_min": 0.1,
+    "alpha_max": 5.0,
+    "target_entropy_delta": 0.05,
+    "target_entropy_clip_min": -1.5,
+    "target_entropy_clip_max": 0.0
   },
   "training": {
     "episodes": 2000,
@@ -32,6 +38,7 @@
     "train_dataset": "train",
     "train_mode": "train",
     "val_dataset": "train",
-    "val_mode": "test"
+    "val_mode": "test",
+    "rewards_window_size": 20
   }
 }
