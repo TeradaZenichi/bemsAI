@@ -1,0 +1,7 @@
+{
+    "days": [1, 2, 3, 4, 5, 6, 7, 8],
+    "train_window": 3,
+    "val_offset": 1,
+    "num_rollouts": 500,
+    "resume_from": null
+}

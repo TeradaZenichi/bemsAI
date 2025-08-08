@@ -1,0 +1,37 @@
+Pensou por dois segundos
+
+
+O potencial-based reward shaping funciona porque acrescenta ao reward imediato um termo telescópico que **não altera** qual política é ótima, mas **fornece sinal imediato** sobre o valor futuro de entrar num estado de maior potencial. Em particular, definindo
+
+$$
+\Phi(s)=K\cdot \mathrm{SoC}(s)
+$$
+
+e o reward moldado
+
+$$
+r'(s,a,s')=r(s,a,s')+\gamma\,\Phi(s')-\Phi(s),
+$$
+
+temos:
+
+1. **Soma telescópica**
+
+   $$
+     \sum_{t=0}^{T}\gamma^t r'(s_t,a_t,s_{t+1})
+     =\sum_{t=0}^{T}\gamma^t r(s_t,a_t,s_{t+1})
+       +\sum_{t=0}^{T}\bigl(\gamma^{t+1}\Phi(s_{t+1})-\gamma^t\Phi(s_t)\bigr).
+   $$
+
+   O segundo termo “cancela” quase tudo (telescópico), sobrando apenas $\gamma^{T+1}\Phi(s_{T+1})-\Phi(s_0)$, que tende a zero quando $T\to\infty$ e $\Phi$ for limitada.
+
+2. **Invariância de política**
+   Como a soma de rewards ao longo de qualquer trajetória só difere da original por uma constante, toda ordenação de políticas por valor esperado fica inalterada. Ou seja, **a política que maximiza $r'$ é a mesma que maximizaria $r$.**
+
+3. **Sinal imediato**
+   O termo $\gamma\,\Phi(s')-\Phi(s)$ dá um ganho positivo sempre que $\Phi(s')>\Phi(s)$ (por ex. ao aumentar a SoC), guiando o agente a “sentir” imediatamente o benefício de carregar hoje para evitar custos amanhã.
+
+---
+
+**Referência principal:**
+Andrew Y. Ng, Da-Wei Harada e Stuart Russell, “Policy Invariance under Reward Transformations: Theory and Application to Reward Shaping”, *Proceedings of the 16th International Conference on Machine Learning (ICML)*, 1999.

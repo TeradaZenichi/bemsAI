@@ -1,0 +1,495 @@
+[
+  {
+    "train_days": [
+      1,
+      2,
+      3
+    ],
+    "val_days": [
+      4,
+      5
+    ],
+    "sequential_costs": [
+      6.999651337510318
+    ],
+    "sequential_rewards": [
+      -8.443190032322363
+    ],
+    "standard_costs_mean": 3.802658082792508,
+    "standard_costs_per_soc": [
+      4.456281168774363,
+      3.7975712328446014,
+      3.1541218467585597
+    ],
+    "standard_rewards_mean": -3.754268256413127,
+    "standard_rewards_per_soc": [
+      -4.330209915663436,
+      -3.690841953660478,
+      -3.241752899915466
+    ]
+  },
+  {
+    "train_days": [
+      1,
+      2,
+      3
+    ],
+    "val_days": [
+      4,
+      5
+    ],
+    "sequential_costs": [
+      6.999651337510318
+    ],
+    "sequential_rewards": [
+      -8.443190032322363
+    ],
+    "standard_costs_mean": 3.802658082792508,
+    "standard_costs_per_soc": [
+      4.456281168774363,
+      3.7975712328446014,
+      3.1541218467585597
+    ],
+    "standard_rewards_mean": -3.754268256413127,
+    "standard_rewards_per_soc": [
+      -4.330209915663436,
+      -3.690841953660478,
+      -3.241752899915466
+    ]
+  },
+  {
+    "train_days": [
+      2,
+      3,
+      4
+    ],
+    "val_days": [
+      5,
+      6
+    ],
+    "sequential_costs": [
+      19.874400938365767
+    ],
+    "sequential_rewards": [
+      -25.26357424717238
+    ],
+    "standard_costs_mean": 3.992272039084869,
+    "standard_costs_per_soc": [
+      4.624689089833819,
+      3.9739448328238813,
+      3.378182194596906
+    ],
+    "standard_rewards_mean": -4.1339640673261515,
+    "standard_rewards_per_soc": [
+      -4.727565479316934,
+      -4.085903327353037,
+      -3.588423395308484
+    ]
+  },
+  {
+    "train_days": [
+      3,
+      4,
+      5
+    ],
+    "val_days": [
+      6,
+      7
+    ],
+    "sequential_costs": [
+      4.707797332249767
+    ],
+    "sequential_rewards": [
+      -7.126748975241489
+    ],
+    "standard_costs_mean": 3.9293377518743817,
+    "standard_costs_per_soc": [
+      4.512276315093263,
+      3.935790178873065,
+      3.3399467616568175
+    ],
+    "standard_rewards_mean": -3.4712859304132606,
+    "standard_rewards_per_soc": [
+      -3.930135700680593,
+      -3.401716905054817,
+      -3.082005185504372
+    ]
+  },
+  {
+    "train_days": [
+      4,
+      5,
+      6
+    ],
+    "val_days": [
+      7,
+      8
+    ],
+    "sequential_costs": [
+      6.906152479056553
+    ],
+    "sequential_rewards": [
+      -11.237671221937093
+    ],
+    "standard_costs_mean": 4.270649828033023,
+    "standard_costs_per_soc": [
+      4.965941199621411,
+      4.2413988344895435,
+      3.604609449988117
+    ],
+    "standard_rewards_mean": -4.528178627106599,
+    "standard_rewards_per_soc": [
+      -5.187267125860941,
+      -4.507593497193546,
+      -3.889675258265312
+    ]
+  },
+  {
+    "train_days": [
+      5,
+      6,
+      7
+    ],
+    "val_days": [
+      8,
+      9
+    ],
+    "sequential_costs": [
+      10.655281585553487
+    ],
+    "sequential_rewards": [
+      -10.610718334041094
+    ],
+    "standard_costs_mean": 4.05831242836323,
+    "standard_costs_per_soc": [
+      4.751618029841709,
+      4.1211825714988235,
+      3.302136683749158
+    ],
+    "standard_rewards_mean": -4.31755526229938,
+    "standard_rewards_per_soc": [
+      -5.0613115103507464,
+      -4.394781339446949,
+      -3.4965729371004435
+    ]
+  },
+  {
+    "train_days": [
+      6,
+      7,
+      8
+    ],
+    "val_days": [
+      9,
+      10
+    ],
+    "sequential_costs": [
+      3.750391474485086
+    ],
+    "sequential_rewards": [
+      -13.392045901136703
+    ],
+    "standard_costs_mean": 4.0981394981447865,
+    "standard_costs_per_soc": [
+      4.8118132936659315,
+      4.112831360394377,
+      3.3697738403740525
+    ],
+    "standard_rewards_mean": -4.374143037345539,
+    "standard_rewards_per_soc": [
+      -5.090927781323386,
+      -4.41314067693082,
+      -3.6183606537824127
+    ]
+  },
+  {
+    "train_days": [
+      7,
+      8,
+      9
+    ],
+    "val_days": [
+      10,
+      11
+    ],
+    "sequential_costs": [
+      7.258830716780479
+    ],
+    "sequential_rewards": [
+      -24.650547473395815
+    ],
+    "standard_costs_mean": 4.101411517959851,
+    "standard_costs_per_soc": [
+      4.774217933600792,
+      4.148945770896185,
+      3.3810708493825725
+    ],
+    "standard_rewards_mean": -4.465930534092966,
+    "standard_rewards_per_soc": [
+      -5.136168571339738,
+      -4.514083544680017,
+      -3.747539486259144
+    ]
+  },
+  {
+    "train_days": [
+      8,
+      9,
+      10
+    ],
+    "val_days": [
+      11,
+      12
+    ],
+    "sequential_costs": [
+      9.892903674273477
+    ],
+    "sequential_rewards": [
+      -18.390726172984714
+    ],
+    "standard_costs_mean": 4.09503126528599,
+    "standard_costs_per_soc": [
+      4.730339084347666,
+      4.130510571577002,
+      3.424244139933302
+    ],
+    "standard_rewards_mean": -4.115950088489397,
+    "standard_rewards_per_soc": [
+      -4.660867774724482,
+      -4.104415003528446,
+      -3.5825674872152624
+    ]
+  },
+  {
+    "train_days": [
+      9,
+      10,
+      11
+    ],
+    "val_days": [
+      12,
+      13
+    ],
+    "sequential_costs": [
+      7.495555424710998
+    ],
+    "sequential_rewards": [
+      -10.165650025812075
+    ],
+    "standard_costs_mean": 4.299386937117045,
+    "standard_costs_per_soc": [
+      5.025399058289607,
+      4.291091644724988,
+      3.581670108336541
+    ],
+    "standard_rewards_mean": -4.289151314544455,
+    "standard_rewards_per_soc": [
+      -4.8708866511086635,
+      -4.226767135162775,
+      -3.769800157361926
+    ]
+  },
+  {
+    "train_days": [
+      10,
+      11,
+      12
+    ],
+    "val_days": [
+      13,
+      14
+    ],
+    "sequential_costs": [
+      8.635466068740175
+    ],
+    "sequential_rewards": [
+      -8.49697046315359
+    ],
+    "standard_costs_mean": 4.305741884498659,
+    "standard_costs_per_soc": [
+      4.9928280607759925,
+      4.251072768900913,
+      3.67332482381907
+    ],
+    "standard_rewards_mean": -4.478957734239068,
+    "standard_rewards_per_soc": [
+      -5.085685293958958,
+      -4.422762803537918,
+      -3.928425105220328
+    ]
+  },
+  {
+    "train_days": [
+      11,
+      12,
+      13
+    ],
+    "val_days": [
+      14,
+      15
+    ],
+    "sequential_costs": [
+      5.665636426758931
+    ],
+    "sequential_rewards": [
+      -5.7788709385419565
+    ],
+    "standard_costs_mean": 3.9735493148723453,
+    "standard_costs_per_soc": [
+      4.607755349644634,
+      3.938317128977116,
+      3.374575465995285
+    ],
+    "standard_rewards_mean": -3.6383712147075946,
+    "standard_rewards_per_soc": [
+      -4.076723414673076,
+      -3.4834469665656944,
+      -3.354943262884014
+    ]
+  },
+  {
+    "train_days": [
+      12,
+      13,
+      14
+    ],
+    "val_days": [
+      15,
+      16
+    ],
+    "sequential_costs": [
+      3.433586531842151
+    ],
+    "sequential_rewards": [
+      -4.83386322871987
+    ],
+    "standard_costs_mean": 3.9688978366872987,
+    "standard_costs_per_soc": [
+      4.6339709194972825,
+      3.9869882640945558,
+      3.2857343264700583
+    ],
+    "standard_rewards_mean": -3.935566235605546,
+    "standard_rewards_per_soc": [
+      -4.513556563464735,
+      -3.8953027628294277,
+      -3.397839380522475
+    ]
+  },
+  {
+    "train_days": [
+      13,
+      14,
+      15
+    ],
+    "val_days": [
+      16,
+      17
+    ],
+    "sequential_costs": [
+      2.119321453496263
+    ],
+    "sequential_rewards": [
+      -4.849726962038646
+    ],
+    "standard_costs_mean": 4.531882842578955,
+    "standard_costs_per_soc": [
+      5.243865684268437,
+      4.455217055916829,
+      3.8965657875515975
+    ],
+    "standard_rewards_mean": -4.573236584846156,
+    "standard_rewards_per_soc": [
+      -5.165000426607519,
+      -4.4073850027149035,
+      -4.1473243252160445
+    ]
+  },
+  {
+    "train_days": [
+      14,
+      15,
+      16
+    ],
+    "val_days": [
+      17,
+      18
+    ],
+    "sequential_costs": [
+      9.0658912690366
+    ],
+    "sequential_rewards": [
+      -9.510659849650699
+    ],
+    "standard_costs_mean": 3.771597218417235,
+    "standard_costs_per_soc": [
+      4.379340628331263,
+      3.7981583804215284,
+      3.137292646498914
+    ],
+    "standard_rewards_mean": -3.79552290562572,
+    "standard_rewards_per_soc": [
+      -4.308723744596675,
+      -3.796458362005763,
+      -3.281386610274721
+    ]
+  },
+  {
+    "train_days": [
+      15,
+      16,
+      17
+    ],
+    "val_days": [
+      18,
+      19
+    ],
+    "sequential_costs": [
+      9.455700328153362
+    ],
+    "sequential_rewards": [
+      -9.147889422604472
+    ],
+    "standard_costs_mean": 4.27649331547109,
+    "standard_costs_per_soc": [
+      4.886653324399811,
+      4.324786280274944,
+      3.618040341738514
+    ],
+    "standard_rewards_mean": -4.112610874195197,
+    "standard_rewards_per_soc": [
+      -4.570938448258273,
+      -4.070175022758715,
+      -3.696719151568605
+    ]
+  },
+  {
+    "train_days": [
+      16,
+      17,
+      18
+    ],
+    "val_days": [
+      19,
+      20
+    ],
+    "sequential_costs": [
+      2.894786462708503
+    ],
+    "sequential_rewards": [
+      -3.0971804295399945
+    ],
+    "standard_costs_mean": 3.94168337970959,
+    "standard_costs_per_soc": [
+      4.594396329192426,
+      3.9812611555716657,
+      3.249392654364678
+    ],
+    "standard_rewards_mean": -4.200963844975237,
+    "standard_rewards_per_soc": [
+      -4.836561646662364,
+      -4.2166315901913896,
+      -3.549698298071958
+    ]
+  }
+]

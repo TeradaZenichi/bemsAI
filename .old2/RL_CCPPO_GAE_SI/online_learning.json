@@ -1,8 +1,0 @@
-{
-    "total_days": 60,
-    "train_window": 3,
-    "val_window": 2,
-    "num_rollouts": 1000,
-    "test_days": 30,
-    "resume_from": null
-}

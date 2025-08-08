@@ -1,7 +1,0 @@
-Este é o “dual ascent” para constrained RL (ver Lagrangian RL, Constrained Policy Optimization, etc.).
-
-Veja exemplos:
-
-Spinning Up - Lagrangian methods
-
-Papers: "Constrained Policy Optimization", "Safe Reinforcement Learning via Lagrangian Methods" (Ray et al., 2019).

@@ -66,9 +66,15 @@ class SACHyperParameters:
         self.min_delta    = self.training.get("min_delta", 1e-3)
         self.replay_size  = ap.get("replay_size", 1_000_000)
 
+        # Regularization
+        self.lambda_ewc = ap.get("lambda_ewc", 0.0)
+        self.lambda_si  = ap.get("lambda_si", 0.0)
+        self.lambda_mas = ap.get("lambda_mas", 0.0)
+        self.lambda_lwf = ap.get("lambda_lwf", 0.0)
+
 # --- REPLAY BUFFER ---
 class ReplayBuffer:
-    def __init__(self, capacity=1_000_000):
+    def __init__(self, capacity=100_000):
         self.capacity = capacity
         self.buffer = []
         self.position = 0
@@ -118,6 +124,7 @@ class SACTrainer:
         self.target_entropy = -float(self.act_dim)
         self.log_alpha = torch.zeros(1, requires_grad=True, device=hp.device, dtype=torch.float32)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=hp.alpha_lr)
+
     def create_env(self, data_dir, dataset, start_idx, episode_length, mode):
         from env import EnergyEnvContinuous
         return EnergyEnvContinuous(
@@ -128,8 +135,46 @@ class SACTrainer:
             observations=self.hp.observations,
             mode=mode
         )
+    
     def needs_warmup(self):
         return len(self.buffer) < self.hp.batch_size
+    
+    def penalty_ewc(self):
+        if not hasattr(self, "fisher") or not hasattr(self, "prev_params_ewc") or self.fisher is None or self.prev_params_ewc is None:
+            return 0.0
+        loss = 0.0
+        for n, p in self.agent.named_parameters():
+            if n in self.prev_params_ewc:
+                loss += (self.fisher[n] * (p - self.prev_params_ewc[n]).pow(2)).sum()
+        return loss
+
+    def penalty_si(self):
+        if not hasattr(self, "omega_si") or not hasattr(self, "prev_params_si") or self.omega_si is None or self.prev_params_si is None:
+            return 0.0
+        loss = 0.0
+        for n, p in self.agent.named_parameters():
+            if n in self.prev_params_si:
+                loss += (self.omega_si[n] * (p - self.prev_params_si[n]).pow(2)).sum()
+        return loss
+
+    def penalty_mas(self):
+        if not hasattr(self, "omega_mas") or not hasattr(self, "prev_params_mas") or self.omega_mas is None or self.prev_params_mas is None:
+            return 0.0
+        loss = 0.0
+        for n, p in self.agent.named_parameters():
+            if n in self.prev_params_mas:
+                loss += (self.omega_mas[n] * (p - self.prev_params_mas[n]).pow(2)).sum()
+        return loss
+
+    def penalty_lwf(self, states):
+        if not hasattr(self, "teacher") or self.teacher is None:
+            return 0.0
+        with torch.no_grad():
+            target_mu, _ = self.teacher.actor(states)
+        mu, _ = self.agent.actor(states)
+        return F.mse_loss(mu, target_mu)
+
+    
     def train(self):
         self.env_train = self.create_env(
             self.hp.data_dir, self.hp.train_dataset, self.train_start_idx,
@@ -245,6 +290,7 @@ class SACTrainer:
             "alpha_vals": alpha_vals,
             "entropy_vals": entropy_vals
         }
+    
     def evaluate_validation(self):
         soc_init_list = [0.1, 0.5, 0.9]
         all_rewards = []
@@ -260,6 +306,7 @@ class SACTrainer:
                     obs = obs_next
                 all_rewards.append(float(episode_reward))
         return float(np.mean(all_rewards))
+    
     def update(self, batch):
         # --- Unpack and to device, always float32
         state, action, reward, next_state, done = batch
@@ -269,6 +316,7 @@ class SACTrainer:
         reward     = torch.tensor(reward, dtype=torch.float32, device=device).unsqueeze(-1)
         next_state = torch.tensor(next_state, dtype=torch.float32, device=device)
         done       = torch.tensor(done, dtype=torch.float32, device=device).unsqueeze(-1)
+
         # --- Optimizers (initialize once)
         if not hasattr(self, "optimizer_actor"):
             self.optimizer_actor = torch.optim.Adam(self.agent.actor.parameters(), lr=self.hp.actor_lr)
@@ -277,35 +325,55 @@ class SACTrainer:
         if not hasattr(self, "qnet_target"):
             self.qnet_target = copy.deepcopy(self.agent.qnet)
             self.qnet_target.eval()
-        # --- 2. Q-network loss ---
+
+        # --- 1. Critic (Q-network) loss ---
         with torch.no_grad():
             next_action, next_log_prob, _ = self.agent.actor.sample(next_state)
             target_q1, target_q2 = self.qnet_target(next_state, next_action)
             target_q = torch.min(target_q1, target_q2) - self.log_alpha.exp() * next_log_prob
             target_q = reward + (1 - done) * self.hp.gamma * target_q
+
         current_q1, current_q2 = self.agent.qnet(state, action)
         critic_loss = torch.nn.functional.mse_loss(current_q1, target_q) + \
-                      torch.nn.functional.mse_loss(current_q2, target_q)
+                    torch.nn.functional.mse_loss(current_q2, target_q)
+
         self.optimizer_critic.zero_grad()
         critic_loss.backward()
         self.optimizer_critic.step()
-        # --- 3. Policy loss ---
+
+        # --- 2. Policy (actor) loss ---
         new_action, log_prob, _ = self.agent.actor.sample(state)
         q1_new, q2_new = self.agent.qnet(state, new_action)
         q_new = torch.min(q1_new, q2_new)
         actor_loss = (self.log_alpha.exp() * log_prob - q_new).mean()
+
+        # --- 3. Regularization (EWC, SI, MAS, LwF) ---
+        reg_loss = 0.0
+        if getattr(self.hp, "lambda_ewc", 0.0) > 0.0:
+            reg_loss += self.hp.lambda_ewc * self.penalty_ewc()
+        if getattr(self.hp, "lambda_si", 0.0) > 0.0:
+            reg_loss += self.hp.lambda_si * self.penalty_si()
+        if getattr(self.hp, "lambda_mas", 0.0) > 0.0:
+            reg_loss += self.hp.lambda_mas * self.penalty_mas()
+        if getattr(self.hp, "lambda_lwf", 0.0) > 0.0:
+            reg_loss += self.hp.lambda_lwf * self.penalty_lwf(state)
+        actor_loss = actor_loss + reg_loss
+
         self.optimizer_actor.zero_grad()
         actor_loss.backward()
         self.optimizer_actor.step()
+
         # --- 4. Alpha loss (entropy tuning) ---
         entropy = log_prob.detach().mean().item()  # log_prob mean as entropy estimator
         alpha_loss = -(self.log_alpha.exp() * (log_prob + self.target_entropy).detach()).mean()
         self.alpha_optimizer.zero_grad()
         alpha_loss.backward()
         self.alpha_optimizer.step()
+
         # --- 5. Soft update of target net ---
         for param, target_param in zip(self.agent.qnet.parameters(), self.qnet_target.parameters()):
             target_param.data.copy_(self.hp.tau * param.data + (1 - self.hp.tau) * target_param.data)
+
         return {
             "critic_loss": critic_loss.item(),
             "actor_loss": actor_loss.item(),
@@ -315,6 +383,7 @@ class SACTrainer:
             "q2": current_q2.mean().item(),
             "entropy": entropy
         }
+
 
 # --- EVAL/PLOT ---
 def run_episode_for_plot(env, agent, device):
@@ -357,8 +426,8 @@ def run_episode_for_plot(env, agent, device):
 if __name__ == "__main__":
     # Configs
     hp = SACHyperParameters("data/parameters.json", "SAC_MLP_REG/model.json")
-    train_days = [1, 2]
-    val_days = [3]
+    train_days = [1, 2, 3]
+    val_days = [4, 5]
     set_global_seed(hp.seed)
     trainer = SACTrainer(hp, train_days=train_days, val_days=val_days)
     trainer.train()

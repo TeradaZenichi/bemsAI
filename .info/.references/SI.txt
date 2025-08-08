@@ -1,0 +1,5 @@
+Zenke, F., Poole, B., & Ganguli, S. (2017).
+
+Continual Learning Through Synaptic Intelligence
+
+https://arxiv.org/abs/1703.04200

@@ -1,0 +1,36 @@
+# NoisyLinear
+
+O **NoisyLinear** é uma camada linear modificada que adiciona ruído Gaussiano fatorizado aos pesos e bias durante o treinamento, conforme proposto por Fortunato et al. no paper **"Noisy Networks for Exploration"** (ICLR 2018).
+
+**Como funciona**:
+
+1. **Parâmetros aprendíveis**:
+
+   * $\mu_w, \sigma_w$: média e desvio padrão dos pesos de dimensão $\text{out}\times\text{in}$.
+   * $\mu_b, \sigma_b$: média e desvio padrão dos bias de dimensão $\text{out}$.
+
+2. **Ruído fatorizado**:
+
+   * Gera vetores de ruído $\varepsilon_{in}\in\mathbb{R}^{in}$ e $\varepsilon_{out}\in\mathbb{R}^{out}$.
+   * Constrói a matriz de ruído para pesos por produto externo: $\varepsilon_w = \varepsilon_{out}\varepsilon_{in}^T$.
+   * Ruído para bias: $\varepsilon_b = \varepsilon_{out}$.
+
+3. **Forward pass com ruído**:
+   Durante o treinamento, a cada chamado de `reset_noise()`:
+
+   $$
+     w = \mu_w + \sigma_w \odot \varepsilon_w,
+     \quad b = \mu_b + \sigma_b \odot \varepsilon_b.
+   $$
+
+   Em seguida, aplica-se o produto linear $y = xw^T + b$.
+   Em avaliação, usa-se apenas $\mu_w$ e $\mu_b$.
+
+**Vantagens**:
+
+* Integração de exploração diretamente nos parâmetros da rede, substituindo ou complementando estratégias como ε‑greedy.
+* Permite autoajuste do grau de ruído via aprendizado de $\sigma_w$ e $\sigma_b$.
+* Melhor desempenho em tarefas de exploração difícil.
+
+**Referência**:
+Fortunato, M., Azar, M. G., Piot, B., Menick, J., Osband, I., Graves, A., ... & Blundell, C. (2018). *Noisy Networks for Exploration*. In *International Conference on Learning Representations (ICLR)*.
