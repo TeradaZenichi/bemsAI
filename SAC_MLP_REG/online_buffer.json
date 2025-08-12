@@ -1,0 +1,33 @@
+{
+  "total_days": 30,
+  "train_window": 3,
+  "val_window": 2,
+  "test_days": 30,
+
+  "buffer": {
+    "type": "growing_prioritized", 
+    "params": {
+      "capacity": 1000000,       
+      "max_capacity": 1000000,   
+      "alpha": 0.8               
+    },
+    "grow_schedule": {
+      "mode": "factor",          
+      "value": 1.2               
+    }
+  },
+
+  "regularization": {
+    "type": "ewc+si",            
+    "params": {
+      "lambda_ewc": 0.2,
+      "lambda_si": 0.1,
+      "lambda_mas": 0.0,
+      "lambda_lwf": 0.0
+    }
+  },
+
+  "experiments": [
+    { "exp_type": "exp_buffer_reg_combo_1" }
+  ]
+}

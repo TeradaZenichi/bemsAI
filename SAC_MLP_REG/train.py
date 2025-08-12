@@ -6,12 +6,15 @@ import copy
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from tqdm import trange
 import matplotlib.pyplot as plt
 
 # Add the project root directory to PYTHONPATH
 target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(target_path)
+
+from Buffers import ReplayBuffer, GrowingReplayBuffer, RecentPrioritizedReplayBuffer, GrowingRecentPrioritizedReplayBuffer
 
 # --- UTILS ---
 def set_global_seed(seed):
@@ -36,12 +39,12 @@ class SACHyperParameters:
         # Dataset and episode setup
         self.data_dir        = self.training.get("data_dir", "data")
         self.train_dataset   = self.training.get("train_dataset", "train")
-        self.train_ep_len    = self.training.get("train_episode_length", 288)
+        self.train_episode_length    = self.training.get("train_episode_length", 288)
         self.train_mode      = self.training.get("train_mode", "train")
         self.train_days      = self.training.get("train_days", [1])
         self.val_days        = self.training.get("val_days", [2])
         self.val_dataset     = self.training.get("val_dataset", "train")
-        self.val_ep_len      = self.training.get("val_episode_length", 288)
+        self.val_episode_length      = self.training.get("val_episode_length", 288)
         self.val_mode        = self.training.get("val_mode", "train")
         # Agent
         ap = self.agent_params
@@ -72,35 +75,13 @@ class SACHyperParameters:
         self.lambda_mas = ap.get("lambda_mas", 0.0)
         self.lambda_lwf = ap.get("lambda_lwf", 0.0)
 
-# --- REPLAY BUFFER ---
-class ReplayBuffer:
-    def __init__(self, capacity=100_000):
-        self.capacity = capacity
-        self.buffer = []
-        self.position = 0
-    def push(self, state, action, reward, next_state, done):
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(None)
-        # All as float32 for consistency
-        tup = (
-            np.array(state, dtype=np.float32),
-            np.array(action, dtype=np.float32),
-            np.array(reward, dtype=np.float32),
-            np.array(next_state, dtype=np.float32),
-            np.array(done, dtype=np.float32)
-        )
-        self.buffer[self.position] = tup
-        self.position = (self.position + 1) % self.capacity
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
-        state, action, reward, next_state, done = map(np.stack, zip(*batch))
-        return state, action, reward, next_state, done
-    def __len__(self):
-        return len(self.buffer)
+        # Buffer Type
+        self.buffer_type = self.training.get("buffer_type", "fixed")
+        self.prioritized_alpha = self.training.get("prioritized_alpha", 0.6)
 
 # --- TRAINER ---
 class SACTrainer:
-    def __init__(self, hp, train_days, val_days):
+    def __init__(self, hp, train_days, val_days, buffer=None):
         from SAC_MLP_REG.model import SACAgent
         self.hp = hp
         self.env_train = None
@@ -119,7 +100,7 @@ class SACTrainer:
         self.act_dim = hp.act_dim
         self.agent = None
         self.action_space = None
-        self.buffer = ReplayBuffer(capacity=hp.agent_params.get("replay_size", 1_000_000))
+        self.buffer = buffer if buffer is not None else ReplayBuffer(capacity=hp.agent_params.get("replay_size", 1_000_000))
         # Entropy tuning
         self.target_entropy = -float(self.act_dim)
         self.log_alpha = torch.zeros(1, requires_grad=True, device=hp.device, dtype=torch.float32)
@@ -135,17 +116,18 @@ class SACTrainer:
             observations=self.hp.observations,
             mode=mode
         )
-    
+
     def needs_warmup(self):
         return len(self.buffer) < self.hp.batch_size
-    
+
+    # ---------- Regularization penalties (usam buffers/omegas/teachers) ----------
     def penalty_ewc(self):
         if not hasattr(self, "fisher") or not hasattr(self, "prev_params_ewc") or self.fisher is None or self.prev_params_ewc is None:
             return 0.0
         loss = 0.0
         for n, p in self.agent.named_parameters():
             if n in self.prev_params_ewc:
-                loss += (self.fisher[n] * (p - self.prev_params_ewc[n]).pow(2)).sum()
+                loss += (self.fisher[n].to(p.device, p.dtype) * (p - self.prev_params_ewc[n].to(p.device, p.dtype)).pow(2)).sum()
         return loss
 
     def penalty_si(self):
@@ -154,7 +136,7 @@ class SACTrainer:
         loss = 0.0
         for n, p in self.agent.named_parameters():
             if n in self.prev_params_si:
-                loss += (self.omega_si[n] * (p - self.prev_params_si[n]).pow(2)).sum()
+                loss += (self.omega_si[n].to(p.device, p.dtype) * (p - self.prev_params_si[n].to(p.device, p.dtype)).pow(2)).sum()
         return loss
 
     def penalty_mas(self):
@@ -163,7 +145,7 @@ class SACTrainer:
         loss = 0.0
         for n, p in self.agent.named_parameters():
             if n in self.prev_params_mas:
-                loss += (self.omega_mas[n] * (p - self.prev_params_mas[n]).pow(2)).sum()
+                loss += (self.omega_mas[n].to(p.device, p.dtype) * (p - self.prev_params_mas[n].to(p.device, p.dtype)).pow(2)).sum()
         return loss
 
     def penalty_lwf(self, states):
@@ -174,7 +156,124 @@ class SACTrainer:
         mu, _ = self.agent.actor(states)
         return F.mse_loss(mu, target_mu)
 
-    
+    # ---------- Métodos solicitados: snapshots e importâncias ----------
+    @torch.no_grad()
+    def get_params_snapshot(self):
+        """Snapshot dos parâmetros treináveis do agente no device atual."""
+        snap = {}
+        for n, p in self.agent.named_parameters():
+            if p.requires_grad:
+                snap[n] = p.detach().clone()  # mantém no mesmo device/dtype
+        return snap
+
+    def _zeros_like_params(self):
+        return {n: torch.zeros_like(p, device=p.device, dtype=p.dtype)
+                for n, p in self.agent.named_parameters() if p.requires_grad}
+
+    def _iter_state_batches_from_buffer(self, batch_size, num_batches):
+        """Gera batches de estados a partir do replay buffer (se disponível)."""
+        if len(self.buffer) < batch_size:
+            return
+        for _ in range(num_batches):
+            s, a, r, ns, d = self.buffer.sample(batch_size)
+            yield torch.tensor(s, dtype=torch.float32, device=self.hp.device)
+
+    def compute_fisher_information(self, num_batches=8):
+        """
+        Aproxima a Fisher diagonal (EWC) via grad² de log π(a|s).
+        Usa batches do replay buffer; se não houver dados, devolve zeros.
+        """
+        if len(self.buffer) < max(32, self.hp.batch_size // 2):
+            return self._zeros_like_params()
+
+        fisher = self._zeros_like_params()
+        self.agent.actor.train()
+        # acumulador em float32
+        accum_counts = 0
+        for states in self._iter_state_batches_from_buffer(self.hp.batch_size, num_batches):
+            # Amostra ações da política atual
+            new_action, log_prob, _ = self.agent.actor.sample(states)
+            self.agent.actor.zero_grad(set_to_none=True)
+            # grad de soma de log_probs
+            log_prob.sum().backward(retain_graph=False)
+            # acumula grad^2 para cada parâmetro
+            for n, p in self.agent.actor.named_parameters():
+                if p.grad is None or n not in fisher:
+                    continue
+                fisher[n] += (p.grad.detach() ** 2)
+            accum_counts += 1
+
+        if accum_counts == 0:
+            return self._zeros_like_params()
+        for n in fisher:
+            fisher[n] /= float(accum_counts)
+        return fisher
+
+    def compute_si_importance(self, num_batches=8):
+        """
+        Aproximação de SI: média de |grad| do loss da política (entropia ajustada).
+        Não é a formulação completa de SI (com P, Δθ), mas funciona como proxy estável.
+        """
+        if len(self.buffer) < max(32, self.hp.batch_size // 2):
+            return self._zeros_like_params()
+
+        omega = self._zeros_like_params()
+        accum = 0
+        self.agent.actor.train()
+        for states in self._iter_state_batches_from_buffer(self.hp.batch_size, num_batches):
+            # loss típico da política (SAC): α*logπ - Q
+            new_action, log_prob, _ = self.agent.actor.sample(states)
+            with torch.no_grad():
+                q1, q2 = self.agent.qnet(states, new_action)
+                q_min = torch.min(q1, q2)
+            policy_loss = (self.log_alpha.exp() * log_prob - q_min).mean()
+
+            self.agent.actor.zero_grad(set_to_none=True)
+            policy_loss.backward(retain_graph=False)
+
+            for n, p in self.agent.actor.named_parameters():
+                if p.grad is None or n not in omega:
+                    continue
+                omega[n] += p.grad.detach().abs()
+            accum += 1
+
+        if accum == 0:
+            return self._zeros_like_params()
+        for n in omega:
+            omega[n] /= float(accum)
+        return omega
+
+    def compute_mas_importance(self, num_batches=8):
+        """
+        MAS: sensibilidade do output da policy às mudanças de parâmetros.
+        Usamos L = mean(||μ(s)||^2); ω ≈ |∂L/∂θ|.
+        """
+        if len(self.buffer) < max(32, self.hp.batch_size // 2):
+            return self._zeros_like_params()
+
+        omega = self._zeros_like_params()
+        accum = 0
+        self.agent.actor.train()
+        for states in self._iter_state_batches_from_buffer(self.hp.batch_size, num_batches):
+            mu, _ = self.agent.actor(states)  # média da ação
+            loss = (mu ** 2).mean()
+
+            self.agent.actor.zero_grad(set_to_none=True)
+            loss.backward(retain_graph=False)
+
+            for n, p in self.agent.actor.named_parameters():
+                if p.grad is None or n not in omega:
+                    continue
+                omega[n] += p.grad.detach().abs()
+            accum += 1
+
+        if accum == 0:
+            return self._zeros_like_params()
+        for n in omega:
+            omega[n] /= float(accum)
+        return omega
+
+    # ------------------ treino/val ------------------
     def train(self):
         self.env_train = self.create_env(
             self.hp.data_dir, self.hp.train_dataset, self.train_start_idx,
@@ -290,7 +389,7 @@ class SACTrainer:
             "alpha_vals": alpha_vals,
             "entropy_vals": entropy_vals
         }
-    
+
     def evaluate_validation(self):
         soc_init_list = [0.1, 0.5, 0.9]
         all_rewards = []
@@ -306,7 +405,7 @@ class SACTrainer:
                     obs = obs_next
                 all_rewards.append(float(episode_reward))
         return float(np.mean(all_rewards))
-    
+
     def update(self, batch):
         # --- Unpack and to device, always float32
         state, action, reward, next_state, done = batch
@@ -335,7 +434,7 @@ class SACTrainer:
 
         current_q1, current_q2 = self.agent.qnet(state, action)
         critic_loss = torch.nn.functional.mse_loss(current_q1, target_q) + \
-                    torch.nn.functional.mse_loss(current_q2, target_q)
+                      torch.nn.functional.mse_loss(current_q2, target_q)
 
         self.optimizer_critic.zero_grad()
         critic_loss.backward()
@@ -364,7 +463,7 @@ class SACTrainer:
         self.optimizer_actor.step()
 
         # --- 4. Alpha loss (entropy tuning) ---
-        entropy = log_prob.detach().mean().item()  # log_prob mean as entropy estimator
+        entropy = log_prob.detach().mean().item()  # rough entropy estimator
         alpha_loss = -(self.log_alpha.exp() * (log_prob + self.target_entropy).detach()).mean()
         self.alpha_optimizer.zero_grad()
         alpha_loss.backward()
@@ -383,7 +482,6 @@ class SACTrainer:
             "q2": current_q2.mean().item(),
             "entropy": entropy
         }
-
 
 # --- EVAL/PLOT ---
 def run_episode_for_plot(env, agent, device):
@@ -429,7 +527,20 @@ if __name__ == "__main__":
     train_days = [1, 2, 3]
     val_days = [4, 5]
     set_global_seed(hp.seed)
-    trainer = SACTrainer(hp, train_days=train_days, val_days=val_days)
+
+    # Escolha do buffer
+    if hp.buffer_type == "fixed":
+        buffer = ReplayBuffer(capacity=hp.replay_size)
+    elif hp.buffer_type == "growing":
+        buffer = GrowingReplayBuffer(max_capacity=hp.replay_size)
+    elif hp.buffer_type == "prioritized":
+        buffer = RecentPrioritizedReplayBuffer(capacity=hp.replay_size, alpha=hp.prioritized_alpha)
+    elif hp.buffer_type == "growing_prioritized":
+        buffer = GrowingRecentPrioritizedReplayBuffer(max_capacity=hp.replay_size, alpha=hp.prioritized_alpha)
+    else:
+        raise ValueError(f"Tipo de buffer desconhecido: {hp.buffer_type}")
+
+    trainer = SACTrainer(hp, train_days=train_days, val_days=val_days, buffer=buffer)
     trainer.train()
     # Save model
     save_dir = "models/sac"

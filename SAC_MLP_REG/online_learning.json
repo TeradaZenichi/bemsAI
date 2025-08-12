@@ -8,13 +8,6 @@
   "resume_from_day": null,
   "experiments": [
     {
-      "exp_type": "NONE",
-      "lambda_ewc": 0.0,
-      "lambda_si": 0.0,
-      "lambda_mas": 0.0,
-      "lambda_lwf": 0.0
-    },
-    {
       "exp_type": "EWC",
       "lambda_ewc": 100.0,
       "lambda_si": 0.0,
