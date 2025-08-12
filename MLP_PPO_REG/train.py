@@ -437,27 +437,25 @@ class PPOTrainer:
                     "pat": patience_counter if patience_active else "-"
                 })
 
-                # Early stopping: só ativa a partir de difficulty >= 1.0
-                if diff >= 1.0:
-                    if not patience_active:
-                        patience_active = True
-                        best_val_tracked = v_r
-                        patience_counter = 0
+                if not patience_active:
+                    patience_active = True
+                    best_val_tracked = v_r
+                    patience_counter = 0
 
-                    if v_r > best_val_tracked + min_delta:
-                        best_val_tracked = v_r
-                        patience_counter = 0
-                    else:
-                        patience_counter += 1
+                if v_r > best_val_tracked + min_delta:
+                    best_val_tracked = v_r
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
 
-                    if patience_counter >= patience:
-                        print(f"\nEarly stopping: {patience} rollouts sem melhora (difficulty >= 1.0).")
-                        break
+                if patience_counter >= patience:
+                    print(f"\nEarly stopping: {patience} rollouts sem melhora (difficulty >= 1.0).")
+                    break
 
-                    if v_r > best_val:
-                        best_val = v_r
-                        self.best_state = self.agent.state_dict()
-                        self.best_episode = rollout
+                if v_r > best_val:
+                    best_val = v_r
+                    self.best_state = self.agent.state_dict()
+                    self.best_episode = rollout
 
         print(f"Best episode: {self.best_episode} | Best value: {best_val:.2f}")
         return t_r, v_r
