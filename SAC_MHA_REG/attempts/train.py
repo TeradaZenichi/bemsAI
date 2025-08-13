@@ -9,12 +9,91 @@ import torch
 import torch.nn.functional as F
 from tqdm import trange
 import matplotlib.pyplot as plt
+from collections import deque
+import contextlib
+
+# ---- TF32 em GPUs compatíveis (ganho imediato) ----
+if torch.cuda.is_available():
+    try:
+        torch.set_float32_matmul_precision("high")  # habilita TF32 (PyTorch 2.x)
+    except Exception:
+        pass
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    except Exception:
+        pass
 
 # Add the project root directory to PYTHONPATH
 target_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(target_path)
 
 from Buffers import ReplayBuffer, GrowingReplayBuffer, RecentPrioritizedReplayBuffer, GrowingRecentPrioritizedReplayBuffer
+
+# =======================
+# Seq utils (histórico T)
+# =======================
+class SeqWindow:
+    """
+    Mantém uma janela deslizante de últimos T estados.
+    warmstart(): repete obs0 até encher a janela.
+    """
+    def __init__(self, seq_len: int):
+        assert seq_len >= 1
+        self.seq_len = int(seq_len)
+        self._dq = deque(maxlen=self.seq_len)
+
+    def reset(self, obs0: np.ndarray):
+        self._dq.clear()
+        for _ in range(self.seq_len - 1):
+            self._dq.append(np.array(obs0, copy=True))
+        self._dq.append(np.array(obs0, copy=True))
+
+    def push(self, obs: np.ndarray):
+        self._dq.append(np.array(obs, copy=True))
+
+    def current_seq(self) -> np.ndarray:
+        seq = np.stack(list(self._dq), axis=0)  # [T, D]
+        if seq.dtype != np.float32:
+            seq = seq.astype(np.float32, copy=False)
+        return seq
+
+class SequenceBufferWrapper:
+    """
+    Envolve um buffer padrão para armazenar SEQUÊNCIAS [T,D] (state e next_state).
+    Mantém API push/sample. Retorna rewards/dones como vetores 1D para compatibilidade
+    com o update original (que faz unsqueeze para [B,1]).
+    """
+    def __init__(self, base_buffer, store_next_as_seq: bool = True):
+        self.base = base_buffer
+        self.store_next_as_seq = bool(store_next_as_seq)
+
+    def __len__(self):
+        return len(self.base)
+
+    def set_capacity(self, *args, **kwargs):
+        if hasattr(self.base, "set_capacity"):
+            return self.base.set_capacity(*args, **kwargs)
+
+    def push(self, state_seq, action, reward, next_state_seq, done, **kwargs):
+        s = np.asarray(state_seq, dtype=np.float32)         # [T,D]
+        ns = np.asarray(next_state_seq, dtype=np.float32)   # [T,D]
+        a = np.asarray(action, dtype=np.float32)            # [A] (ou escalar -> vira [1])
+        r = float(reward)
+        d = bool(done)
+        return self.base.push(s, a, r, ns, d, **kwargs)
+
+    def sample(self, batch_size: int):
+        batch = self.base.sample(batch_size)
+        if batch is None:
+            return None
+        states, actions, rewards, next_states, dones = batch
+        states      = np.asarray(states, dtype=np.float32)       # [B,T,D]
+        actions     = np.asarray(actions, dtype=np.float32)      # [B,A] ou [B,]
+        rewards     = np.asarray(rewards, dtype=np.float32)      # [B,]  (compatível com unsqueeze no update)
+        next_states = np.asarray(next_states, dtype=np.float32)  # [B,T,D]
+        dones       = np.asarray(dones, dtype=np.float32)        # [B,]
+        return states, actions, rewards, next_states, dones
 
 # --- UTILS ---
 def set_global_seed(seed):
@@ -23,6 +102,7 @@ def set_global_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    # Mantemos determinism/bm conforme original; TF32/AMP ainda trazem ganhos
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -69,6 +149,12 @@ class SACHyperParameters:
         self.min_delta    = self.training.get("min_delta", 1e-3)
         self.replay_size  = ap.get("replay_size", 1_000_000)
 
+        # >>> NOVO: comprimento da sequência (histórico T)
+        self.seq_len      = ap.get("seq_len", 8)  # valor típico: 8–16
+
+        # >>> NOVO: actor delay (atualiza ator/alpha/target a cada k updates do crítico)
+        self.actor_delay  = self.training.get("actor_delay", 2)
+
         # Regularization
         self.lambda_ewc = ap.get("lambda_ewc", 0.0)
         self.lambda_si  = ap.get("lambda_si", 0.0)
@@ -82,7 +168,9 @@ class SACHyperParameters:
 # --- TRAINER ---
 class SACTrainer:
     def __init__(self, hp, train_days, val_days, buffer=None):
-        from SAC_MLP_REG.model import SACAgent
+        # >>> usa o agente MHA
+        from SAC_MHA_REG.model import SACAgent
+
         self.hp = hp
         self.env_train = None
         self.env_val = None
@@ -100,11 +188,20 @@ class SACTrainer:
         self.act_dim = hp.act_dim
         self.agent = None
         self.action_space = None
-        self.buffer = buffer if buffer is not None else ReplayBuffer(capacity=hp.agent_params.get("replay_size", 1_000_000))
+
+        # >>> envolve o buffer para sequências [T,D]
+        base_buffer = buffer if buffer is not None else ReplayBuffer(capacity=hp.agent_params.get("replay_size", 1_000_000))
+        self.buffer = SequenceBufferWrapper(base_buffer, store_next_as_seq=True)
+
         # Entropy tuning
         self.target_entropy = -float(self.act_dim)
         self.log_alpha = torch.zeros(1, requires_grad=True, device=hp.device, dtype=torch.float32)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=hp.alpha_lr)
+
+        # >>> AMP + Delay
+        self._amp_scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
+        self._global_step = 0
+        self._actor_delay_k = int(getattr(hp, "actor_delay", 2))
 
     def create_env(self, data_dir, dataset, start_idx, episode_length, mode):
         from env import EnergyEnvContinuous
@@ -159,11 +256,10 @@ class SACTrainer:
     # ---------- Métodos solicitados: snapshots e importâncias ----------
     @torch.no_grad()
     def get_params_snapshot(self):
-        """Snapshot dos parâmetros treináveis do agente no device atual."""
         snap = {}
         for n, p in self.agent.named_parameters():
             if p.requires_grad:
-                snap[n] = p.detach().clone()  # mantém no mesmo device/dtype
+                snap[n] = p.detach().clone()
         return snap
 
     def _zeros_like_params(self):
@@ -171,38 +267,27 @@ class SACTrainer:
                 for n, p in self.agent.named_parameters() if p.requires_grad}
 
     def _iter_state_batches_from_buffer(self, batch_size, num_batches):
-        """Gera batches de estados a partir do replay buffer (se disponível)."""
         if len(self.buffer) < batch_size:
             return
         for _ in range(num_batches):
-            s, a, r, ns, d = self.buffer.sample(batch_size)
+            s, a, r, ns, d = self.buffer.sample(batch_size)  # s: [B,T,D]
             yield torch.tensor(s, dtype=torch.float32, device=self.hp.device)
 
     def compute_fisher_information(self, num_batches=8):
-        """
-        Aproxima a Fisher diagonal (EWC) via grad² de log π(a|s).
-        Usa batches do replay buffer; se não houver dados, devolve zeros.
-        """
         if len(self.buffer) < max(32, self.hp.batch_size // 2):
             return self._zeros_like_params()
-
         fisher = self._zeros_like_params()
         self.agent.actor.train()
-        # acumulador em float32
         accum_counts = 0
         for states in self._iter_state_batches_from_buffer(self.hp.batch_size, num_batches):
-            # Amostra ações da política atual
-            new_action, log_prob, _ = self.agent.actor.sample(states)
+            new_action, log_prob, _ = self.agent.actor.sample(states)  # states [B,T,D]
             self.agent.actor.zero_grad(set_to_none=True)
-            # grad de soma de log_probs
             log_prob.sum().backward(retain_graph=False)
-            # acumula grad^2 para cada parâmetro
             for n, p in self.agent.actor.named_parameters():
                 if p.grad is None or n not in fisher:
                     continue
                 fisher[n] += (p.grad.detach() ** 2)
             accum_counts += 1
-
         if accum_counts == 0:
             return self._zeros_like_params()
         for n in fisher:
@@ -210,33 +295,24 @@ class SACTrainer:
         return fisher
 
     def compute_si_importance(self, num_batches=8):
-        """
-        Aproximação de SI: média de |grad| do loss da política (entropia ajustada).
-        Não é a formulação completa de SI (com P, Δθ), mas funciona como proxy estável.
-        """
         if len(self.buffer) < max(32, self.hp.batch_size // 2):
             return self._zeros_like_params()
-
         omega = self._zeros_like_params()
         accum = 0
         self.agent.actor.train()
         for states in self._iter_state_batches_from_buffer(self.hp.batch_size, num_batches):
-            # loss típico da política (SAC): α*logπ - Q
             new_action, log_prob, _ = self.agent.actor.sample(states)
             with torch.no_grad():
                 q1, q2 = self.agent.qnet(states, new_action)
                 q_min = torch.min(q1, q2)
             policy_loss = (self.log_alpha.exp() * log_prob - q_min).mean()
-
             self.agent.actor.zero_grad(set_to_none=True)
             policy_loss.backward(retain_graph=False)
-
             for n, p in self.agent.actor.named_parameters():
                 if p.grad is None or n not in omega:
                     continue
                 omega[n] += p.grad.detach().abs()
             accum += 1
-
         if accum == 0:
             return self._zeros_like_params()
         for n in omega:
@@ -244,29 +320,21 @@ class SACTrainer:
         return omega
 
     def compute_mas_importance(self, num_batches=8):
-        """
-        MAS: sensibilidade do output da policy às mudanças de parâmetros.
-        Usamos L = mean(||μ(s)||^2); ω ≈ |∂L/∂θ|.
-        """
         if len(self.buffer) < max(32, self.hp.batch_size // 2):
             return self._zeros_like_params()
-
         omega = self._zeros_like_params()
         accum = 0
         self.agent.actor.train()
         for states in self._iter_state_batches_from_buffer(self.hp.batch_size, num_batches):
-            mu, _ = self.agent.actor(states)  # média da ação
+            mu, _ = self.agent.actor(states)
             loss = (mu ** 2).mean()
-
             self.agent.actor.zero_grad(set_to_none=True)
             loss.backward(retain_graph=False)
-
             for n, p in self.agent.actor.named_parameters():
                 if p.grad is None or n not in omega:
                     continue
                 omega[n] += p.grad.detach().abs()
             accum += 1
-
         if accum == 0:
             return self._zeros_like_params()
         for n in omega:
@@ -282,6 +350,8 @@ class SACTrainer:
             self.hp.data_dir, self.hp.val_dataset, self.val_start_idx,
             self.val_ep_len, self.hp.val_mode)
         self.action_space = self.env_train.action_space
+
+        # >>> cria agente MHA (sempre atenção)
         self.agent = self.SACAgent(
             obs_dim=self.obs_dim,
             act_dim=self.act_dim,
@@ -292,24 +362,38 @@ class SACTrainer:
             log_std_max=self.hp.log_std_max,
             device=self.hp.device
         )
+
         patience_counter = 0
         training_log = []
         best_val = -float("inf")
         self.best_state = None
         episode_rewards, q1_means, q2_means, actor_losses, critic_losses, alpha_vals, entropy_vals = ([] for _ in range(7))
+
         pbar = trange(self.hp.episodes, desc="Training", dynamic_ncols=True)
         for episode in pbar:
             obs = self.env_train.reset()
+            # >>> janela de sequência com warm-start
+            seqw = SeqWindow(self.hp.seq_len)
+            seqw.reset(obs)
+
             episode_reward = 0
             q1_vals, q2_vals, actor_loss_vals, critic_loss_vals, alpha_vals_local, entropy_local = ([] for _ in range(6))
             val_reward = ""  # Default: empty
             for t in range(self.hp.steps_per_episode):
+                obs_seq = seqw.current_seq()  # [T,D]
                 if self.needs_warmup():
                     action = self.env_train.action_space.sample()
                 else:
-                    action = self.agent.act(obs, deterministic=False)
+                    action = self.agent.act(obs_seq, deterministic=False)
                 obs_next, reward, done, info = self.env_train.step(action)
-                self.buffer.push(obs, action, reward, obs_next, done)
+
+                # next seq
+                seqw.push(obs_next)
+                next_seq = seqw.current_seq()
+
+                # guarda sequência no buffer
+                self.buffer.push(obs_seq, action, reward, next_seq, done)
+
                 if len(self.buffer) > self.hp.batch_size:
                     batch = self.buffer.sample(self.hp.batch_size)
                     update_info = self.update(batch)
@@ -320,10 +404,12 @@ class SACTrainer:
                         critic_loss_vals.append(update_info.get("critic_loss", np.nan))
                         alpha_vals_local.append(update_info.get("alpha", np.nan))
                         entropy_local.append(update_info.get("entropy", np.nan))
+
                 obs = obs_next
                 episode_reward += reward
                 if done:
                     break
+
             # Validation and early stopping
             if (episode + 1) % self.hp.eval_freq == 0:
                 val_reward = self.evaluate_validation()
@@ -337,6 +423,7 @@ class SACTrainer:
             if patience_counter >= self.hp.patience:
                 print(f"\nEarly stopping: {self.hp.patience} validations with no improvement.")
                 break
+
             # Save statistics for this episode
             episode_rewards.append(float(episode_reward))
             q1_means.append(float(np.nanmean(q1_vals) if q1_vals else np.nan))
@@ -376,6 +463,7 @@ class SACTrainer:
                 "BestVal": f"{best_val:.2f}",
                 "Patience": patience_counter
             })
+
         # Save log
         df_log = pd.DataFrame(training_log)
         df_log.to_csv("training_log.csv", index=False)
@@ -391,30 +479,40 @@ class SACTrainer:
         }
 
     def evaluate_validation(self):
+        # avaliação determinística com histórico
         soc_init_list = [0.1, 0.5, 0.9]
         all_rewards = []
         with torch.inference_mode():
             for soc in soc_init_list:
                 obs = self.env_val.reset(initial_soc=soc)
+                seqw = SeqWindow(self.hp.seq_len)
+                seqw.reset(obs)
                 episode_reward = 0
                 done = False
                 while not done:
-                    action = self.agent.act(obs, deterministic=True)
+                    obs_seq = seqw.current_seq()
+                    action = self.agent.act(obs_seq, deterministic=True)
                     obs_next, reward, done, info = self.env_val.step(action)
+                    seqw.push(obs_next)
                     episode_reward += reward
-                    obs = obs_next
                 all_rewards.append(float(episode_reward))
         return float(np.mean(all_rewards))
 
     def update(self, batch):
+        """
+        Atualização com:
+          - AMP (autocast + GradScaler) para crítico/ator/alpha
+          - Actor delay: ator/alpha/target atualizados a cada k passos
+        """
         # --- Unpack and to device, always float32
         state, action, reward, next_state, done = batch
         device = self.hp.device
+        # states e next_states são [B,T,D]
         state      = torch.tensor(state, dtype=torch.float32, device=device)
-        action     = torch.tensor(action, dtype=torch.float32, device=device)
-        reward     = torch.tensor(reward, dtype=torch.float32, device=device).unsqueeze(-1)
         next_state = torch.tensor(next_state, dtype=torch.float32, device=device)
-        done       = torch.tensor(done, dtype=torch.float32, device=device).unsqueeze(-1)
+        action     = torch.tensor(action, dtype=torch.float32, device=device)
+        reward     = torch.tensor(reward, dtype=torch.float32, device=device).unsqueeze(-1) if reward.ndim == 1 else torch.tensor(reward, dtype=torch.float32, device=device)
+        done       = torch.tensor(done, dtype=torch.float32, device=device).unsqueeze(-1) if done.ndim == 1 else torch.tensor(done, dtype=torch.float32, device=device)
 
         # --- Optimizers (initialize once)
         if not hasattr(self, "optimizer_actor"):
@@ -425,79 +523,134 @@ class SACTrainer:
             self.qnet_target = copy.deepcopy(self.agent.qnet)
             self.qnet_target.eval()
 
+        scaler = self._amp_scaler
+        use_amp = scaler is not None and torch.cuda.is_available()
+        amp_ctx = torch.amp.autocast('cuda', dtype=torch.float16) if use_amp else contextlib.nullcontext()
+
         # --- 1. Critic (Q-network) loss ---
-        with torch.no_grad():
-            next_action, next_log_prob, _ = self.agent.actor.sample(next_state)
-            target_q1, target_q2 = self.qnet_target(next_state, next_action)
-            target_q = torch.min(target_q1, target_q2) - self.log_alpha.exp() * next_log_prob
-            target_q = reward + (1 - done) * self.hp.gamma * target_q
+        with amp_ctx:
+            with torch.no_grad():
+                next_action, next_log_prob, _ = self.agent.actor.sample(next_state)      # usa [B,T,D]
+                target_q1, target_q2 = self.qnet_target(next_state, next_action)
+                target_q = torch.min(target_q1, target_q2) - self.log_alpha.exp() * next_log_prob
+                target_q = reward + (1 - done) * self.hp.gamma * target_q
 
-        current_q1, current_q2 = self.agent.qnet(state, action)
-        critic_loss = torch.nn.functional.mse_loss(current_q1, target_q) + \
-                      torch.nn.functional.mse_loss(current_q2, target_q)
+            current_q1, current_q2 = self.agent.qnet(state, action)
+            critic_loss = torch.nn.functional.mse_loss(current_q1, target_q) + \
+                          torch.nn.functional.mse_loss(current_q2, target_q)
 
-        self.optimizer_critic.zero_grad()
-        critic_loss.backward()
-        self.optimizer_critic.step()
+        self.optimizer_critic.zero_grad(set_to_none=True)
+        if use_amp:
+            scaler.scale(critic_loss).backward()
+            scaler.step(self.optimizer_critic)
+        else:
+            critic_loss.backward()
+            self.optimizer_critic.step()
 
-        # --- 2. Policy (actor) loss ---
-        new_action, log_prob, _ = self.agent.actor.sample(state)
-        q1_new, q2_new = self.agent.qnet(state, new_action)
-        q_new = torch.min(q1_new, q2_new)
-        actor_loss = (self.log_alpha.exp() * log_prob - q_new).mean()
+        # --- 2. Policy (actor) + 3. Alpha (com delay) ---
+        should_update_actor = (self._global_step % self._actor_delay_k == 0)
 
-        # --- 3. Regularization (EWC, SI, MAS, LwF) ---
-        reg_loss = 0.0
-        if getattr(self.hp, "lambda_ewc", 0.0) > 0.0:
-            reg_loss += self.hp.lambda_ewc * self.penalty_ewc()
-        if getattr(self.hp, "lambda_si", 0.0) > 0.0:
-            reg_loss += self.hp.lambda_si * self.penalty_si()
-        if getattr(self.hp, "lambda_mas", 0.0) > 0.0:
-            reg_loss += self.hp.lambda_mas * self.penalty_mas()
-        if getattr(self.hp, "lambda_lwf", 0.0) > 0.0:
-            reg_loss += self.hp.lambda_lwf * self.penalty_lwf(state)
-        actor_loss = actor_loss + reg_loss
+        if should_update_actor:
+            with amp_ctx:
+                new_action, log_prob, _ = self.agent.actor.sample(state)
+                q1_new, q2_new = self.agent.qnet(state, new_action)
+                q_new = torch.min(q1_new, q2_new)
+                base_actor_loss = (self.log_alpha.exp() * log_prob - q_new).mean()
 
-        self.optimizer_actor.zero_grad()
-        actor_loss.backward()
-        self.optimizer_actor.step()
+                # Regularizações
+                reg_loss = 0.0
+                if getattr(self.hp, "lambda_ewc", 0.0) > 0.0:
+                    reg_loss = reg_loss + self.hp.lambda_ewc * self.penalty_ewc()
+                if getattr(self.hp, "lambda_si", 0.0) > 0.0:
+                    reg_loss = reg_loss + self.hp.lambda_si * self.penalty_si()
+                if getattr(self.hp, "lambda_mas", 0.0) > 0.0:
+                    reg_loss = reg_loss + self.hp.lambda_mas * self.penalty_mas()
+                if getattr(self.hp, "lambda_lwf", 0.0) > 0.0:
+                    reg_loss = reg_loss + self.hp.lambda_lwf * self.penalty_lwf(state)
+                actor_loss = base_actor_loss + reg_loss
 
-        # --- 4. Alpha loss (entropy tuning) ---
-        entropy = log_prob.detach().mean().item()  # rough entropy estimator
-        alpha_loss = -(self.log_alpha.exp() * (log_prob + self.target_entropy).detach()).mean()
-        self.alpha_optimizer.zero_grad()
-        alpha_loss.backward()
-        self.alpha_optimizer.step()
+            self.optimizer_actor.zero_grad(set_to_none=True)
+            if use_amp:
+                scaler.scale(actor_loss).backward()
+                scaler.step(self.optimizer_actor)
+            else:
+                actor_loss.backward()
+                self.optimizer_actor.step()
 
-        # --- 5. Soft update of target net ---
-        for param, target_param in zip(self.agent.qnet.parameters(), self.qnet_target.parameters()):
-            target_param.data.copy_(self.hp.tau * param.data + (1 - self.hp.tau) * target_param.data)
+            # Alpha (entropy tuning)
+            with amp_ctx:
+                alpha_loss = -(self.log_alpha.exp() * (log_prob + self.target_entropy).detach()).mean()
+            self.alpha_optimizer.zero_grad(set_to_none=True)
+            if use_amp:
+                scaler.scale(alpha_loss).backward()
+                scaler.step(self.alpha_optimizer)
+            else:
+                alpha_loss.backward()
+                self.alpha_optimizer.step()
+
+            entropy_val = log_prob.detach().mean().item()
+            actor_loss_val = float(actor_loss.detach().item())
+            alpha_loss_val = float(alpha_loss.detach().item())
+
+            # Soft update do target (sincronizado com actor delay)
+            for param, target_param in zip(self.agent.qnet.parameters(), self.qnet_target.parameters()):
+                target_param.data.copy_(self.hp.tau * param.data + (1 - self.hp.tau) * target_param.data)
+        else:
+            # Apenas métricas leves sem atualizar ator/alpha
+            with torch.no_grad():
+                new_action, log_prob, _ = self.agent.actor.sample(state)
+                q1_new, q2_new = self.agent.qnet(state, new_action)
+                q_new = torch.min(q1_new, q2_new)
+                base_actor_loss = (self.log_alpha.exp() * log_prob - q_new).mean()
+                # calcular reg_loss sem grad só para logging
+                reg_loss = 0.0
+                if getattr(self.hp, "lambda_ewc", 0.0) > 0.0: reg_loss += float(self.penalty_ewc())
+                if getattr(self.hp, "lambda_si", 0.0) > 0.0: reg_loss += float(self.penalty_si())
+                if getattr(self.hp, "lambda_mas", 0.0) > 0.0: reg_loss += float(self.penalty_mas())
+                if getattr(self.hp, "lambda_lwf", 0.0) > 0.0: reg_loss += float(self.penalty_lwf(state))
+                actor_loss_val = float(base_actor_loss.item() + reg_loss)
+                alpha_loss_val = 0.0
+                entropy_val = float(log_prob.mean().item())
+
+        # Atualiza o scaler uma vez por update
+        if use_amp:
+            scaler.update()
+
+        self._global_step += 1
 
         return {
-            "critic_loss": critic_loss.item(),
-            "actor_loss": actor_loss.item(),
-            "alpha_loss": alpha_loss.item(),
-            "alpha": self.log_alpha.exp().item(),
-            "q1": current_q1.mean().item(),
-            "q2": current_q2.mean().item(),
-            "entropy": entropy
+            "critic_loss": float(critic_loss.item()),
+            "actor_loss": float(actor_loss_val),
+            "alpha_loss": float(alpha_loss_val),
+            "alpha": float(self.log_alpha.exp().item()),
+            "q1": float(current_q1.mean().item()),
+            "q2": float(current_q2.mean().item()),
+            "entropy": float(entropy_val)
         }
 
 # --- EVAL/PLOT ---
-def run_episode_for_plot(env, agent, device):
-    obs_dim = env.observation_space.shape[0]
+def run_episode_for_plot(env, agent, device, seq_len: int):
     max_steps = getattr(env, 'episode_length', 1000)
     state = env.reset()
     done = False
     t = 0
     p_bess, p_grid, p_pv, p_load, socs, times = [], [], [], [], [], []
+
+    # janela de sequência para avaliação
+    seqw = SeqWindow(seq_len)
+    seqw.reset(state)
+
     with torch.inference_mode():
         while not done and t < max_steps:
-            st = torch.as_tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-            action = agent.act(state, deterministic=True)
+            obs_seq = seqw.current_seq()
+            action = agent.act(obs_seq, deterministic=True)
             act_np = action if isinstance(action, (list, np.ndarray)) else action.detach().cpu().numpy()
             nxt, _, done, info = env.step(act_np)
+
+            # update janela
+            seqw.push(nxt)
             state = nxt
+
             socs.append(env.soc)
             times.append(info.get('time', t))
             if hasattr(env, 'pv_series') and 'time' in info:
@@ -523,12 +676,13 @@ def run_episode_for_plot(env, agent, device):
 # --- MAIN ---
 if __name__ == "__main__":
     # Configs
-    hp = SACHyperParameters("data/parameters.json", "SAC_MLP_REG/model.json")
+    # >>> agora apontando para o JSON do modelo MHA
+    hp = SACHyperParameters("data/parameters.json", "SAC_MHA_REG/model.json")
     train_days = [1, 2, 3]
     val_days = [4, 5]
     set_global_seed(hp.seed)
 
-    # Escolha do buffer
+    # Escolha do buffer (base) — será envolvido pelo SequenceBufferWrapper
     if hp.buffer_type == "fixed":
         buffer = ReplayBuffer(capacity=hp.replay_size)
     elif hp.buffer_type == "growing":
@@ -542,8 +696,9 @@ if __name__ == "__main__":
 
     trainer = SACTrainer(hp, train_days=train_days, val_days=val_days, buffer=buffer)
     trainer.train()
+
     # Save model
-    save_dir = "models/sac_mlp"
+    save_dir = "models/sac_mha"
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f"sac_train_{'_'.join(map(str, train_days))}_val_{'_'.join(map(str, val_days))}.pt")
     if hasattr(trainer, "best_state") and trainer.best_state is not None:
@@ -552,8 +707,9 @@ if __name__ == "__main__":
     else:
         torch.save(trainer.agent.state_dict(), save_path)
         print(f"Model saved at: {save_path}")
-    # Validation episode and plot
-    val_plot = run_episode_for_plot(trainer.env_val, trainer.agent, trainer.hp.device)
+
+    # Validation episode and plot (com histórico)
+    val_plot = run_episode_for_plot(trainer.env_val, trainer.agent, trainer.hp.device, seq_len=trainer.hp.seq_len)
     x = range(len(val_plot['times']))
     plt.figure(figsize=(12, 6))
     plt.subplot(2, 1, 1)

@@ -15,12 +15,114 @@ from SAC_MLP_REG.model import SACAgent
 from SAC_MLP_REG.train import SACHyperParameters, SACTrainer
 
 # Buffers definidos em Buffer.py
-from Buffer import (
+from Buffers import (
     ReplayBuffer,                             # fixed
     GrowingReplayBuffer,                      # growing
     RecentPrioritizedReplayBuffer,            # prioritized (recência)
     GrowingRecentPrioritizedReplayBuffer,     # growing + prioritized (recência)
 )
+
+# =========================================================
+# Buffer wrapper: adiciona uma partição "pinned" (exemplares)
+# =========================================================
+class MixedPinnedReplayBuffer:
+    """
+    Wrapper que combina um buffer rolante (um dos buffers já existentes)
+    com um buffer 'pinned' que NUNCA é sobrescrito (até encher).
+    Na amostragem, mistura-se uma fração do batch vinda do pinned.
+    """
+    def __init__(self, rolling_buffer, pinned_capacity=50_000, sample_ratio_pinned=0.2):
+        self.rolling = rolling_buffer
+        # Usamos um ReplayBuffer simples como armazenamento "pinned"
+        self.pinned = ReplayBuffer(capacity=int(pinned_capacity))
+        self.sample_ratio_pinned = float(sample_ratio_pinned)
+        self._pin_count = 0  # contador para reservoir sampling quando pinned encher
+
+    def __len__(self):
+        return len(self.rolling) + len(self.pinned)
+
+    def set_capacity(self, cap):
+        # repassa crescimento apenas para o buffer rolante, se suportado
+        if hasattr(self.rolling, "set_capacity"):
+            self.rolling.set_capacity(int(cap))
+
+    def _reservoir_insert(self, transition):
+        """
+        Se o pinned estiver cheio, faz reservoir sampling simples:
+        com probabilidade cap/(count+1) substitui algum índice aleatório.
+        """
+        if len(self.pinned.buffer) < self.pinned.capacity:
+            # espaço ainda disponível
+            s, a, r, ns, d = transition
+            self.pinned.push(s, a, r, ns, d)
+        else:
+            self._pin_count += 1
+            j = np.random.randint(0, self._pin_count + 1)
+            if j < self.pinned.capacity:
+                s, a, r, ns, d = transition
+                self.pinned.buffer[j] = (s, a, r, ns, d)
+
+    def push(self, *args, **kwargs):
+        """
+        Compatível com chamadas padrão: push(state, action, reward, next_state, done)
+        Opcionalmente aceita 'pin=True' via kwargs para promover diretamente ao pinned.
+        """
+        pin = bool(kwargs.pop("pin", False))
+        if len(args) >= 5:
+            state, action, reward, next_state, done = args[:5]
+        else:
+            raise ValueError("push espera pelo menos 5 argumentos: (state, action, reward, next_state, done)")
+
+        if pin:
+            self._reservoir_insert((state, action, reward, next_state, done))
+        else:
+            self.rolling.push(state, action, reward, next_state, done)
+
+    def sample(self, batch_size):
+        b = int(batch_size)
+        n_p = int(round(b * self.sample_ratio_pinned))
+        n_r = b - n_p
+
+        def _safe_sample(buf, n):
+            if n <= 0 or len(buf) == 0:
+                return None
+            n = min(n, len(buf))
+            return buf.sample(n)
+
+        batch_r = _safe_sample(self.rolling, n_r)
+        batch_p = _safe_sample(self.pinned,  n_p)
+
+        # Se um dos lados estiver vazio, retorna o outro
+        if batch_r is None and batch_p is None:
+            # não há dados suficientes
+            return None
+        if batch_r is None:
+            return batch_p
+        if batch_p is None:
+            return batch_r
+
+        # Concatena (estado, ação, reward, next, done)
+        s = np.concatenate([batch_r[0], batch_p[0]], axis=0)
+        a = np.concatenate([batch_r[1], batch_p[1]], axis=0)
+        r = np.concatenate([batch_r[2], batch_p[2]], axis=0)
+        ns= np.concatenate([batch_r[3], batch_p[3]], axis=0)
+        d = np.concatenate([batch_r[4], batch_p[4]], axis=0)
+        return s, a, r, ns, d
+
+    def promote_from_rolling(self, k=1000):
+        """
+        Promove k amostras do buffer rolante para o pinned.
+        Útil ao final de cada janela de treino.
+        """
+        if len(self.rolling) == 0 or k <= 0:
+            return
+        k = min(int(k), len(self.rolling))
+        batch = self.rolling.sample(k)
+        if batch is None:
+            return
+        s, a, r, ns, d = batch
+        for i in range(k):
+            self.push(s[i], a[i], r[i], ns[i], d[i], pin=True)
 
 # -----------------------------
 # Utils
@@ -60,6 +162,16 @@ def save_configs_and_description(save_dir, params, model_cfg, online_cfg, exp_ty
         for k in ["lambda_ewc", "lambda_si", "lambda_mas", "lambda_lwf"]:
             v = reg_cfg.get("params", {}).get(k, model_cfg.get("agent_params", {}).get(k, 0.0))
             f.write(f"  {k}: {v}\n")
+        # Informações do pinned, se existirem
+        pinned_cfg = (online_cfg.get("buffer", {}) or {}).get("pinned", None)
+        if pinned_cfg:
+            f.write("\nPinned buffer:\n")
+            f.write(f"  capacity: {pinned_cfg.get('capacity', 'n/a')}\n")
+            f.write(f"  sample_ratio: {pinned_cfg.get('sample_ratio', 'n/a')}\n")
+            f.write(f"  promote_k: {pinned_cfg.get('promote_k', 'n/a')}\n")
+            f.write(f"  select_high_performance: {pinned_cfg.get('select_high_performance', False)}\n")
+            f.write(f"  hp_ratio: {pinned_cfg.get('hp_ratio', 0.7)}\n")
+            f.write(f"  rank_by: {pinned_cfg.get('rank_by', 'reward')}\n")
 
 def run_episode_collect(agent, env, device, soc_init=0.5):
     state = env.reset(initial_soc=soc_init)
@@ -163,17 +275,8 @@ def append_costs_rewards_log(
 # -----------------------------
 # Buffer & Regularization from JSON
 # -----------------------------
-def build_buffer_from_config(online_cfg, model_cfg):
-    """Cria o replay buffer a partir da chave 'buffer' em online_buffer.json"""
-    buf_cfg = online_cfg.get("buffer", {}) or {}
-    buf_type = str(buf_cfg.get("type", "fixed")).lower()
-    params = buf_cfg.get("params", {}) or {}
-
-    # Defaults (caem para agent_params quando fizer sentido)
-    capacity     = params.get("capacity",     model_cfg.get("agent_params", {}).get("replay_size", 1_000_000))
-    max_capacity = params.get("max_capacity", model_cfg.get("agent_params", {}).get("replay_size", 1_000_000))
-    alpha        = params.get("alpha", 0.6)
-
+def _make_base_buffer(buf_type, capacity, max_capacity, alpha):
+    """Cria apenas o buffer rolante base, sem pinned."""
     if buf_type == "fixed":
         return ReplayBuffer(capacity=capacity)
     elif buf_type == "growing":
@@ -185,11 +288,42 @@ def build_buffer_from_config(online_cfg, model_cfg):
     else:
         raise ValueError(f"Tipo de buffer desconhecido em online_buffer.json: '{buf_type}'")
 
+def build_buffer_from_config(online_cfg, model_cfg):
+    """
+    Cria o replay buffer a partir da chave 'buffer' em online_buffer.json.
+    Suporta um bloco opcional "pinned" para ativar o wrapper MixedPinnedReplayBuffer.
+    Retorna (buffer, pinned_cfg_dict_ou_None).
+    """
+    buf_cfg = online_cfg.get("buffer", {}) or {}
+    buf_type = str(buf_cfg.get("type", "fixed")).lower()
+    params = buf_cfg.get("params", {}) or {}
+
+    # Defaults (herdando de agent_params quando fizer sentido)
+    capacity     = params.get("capacity",     model_cfg.get("agent_params", {}).get("replay_size", 1_000_000))
+    max_capacity = params.get("max_capacity", model_cfg.get("agent_params", {}).get("replay_size", 1_000_000))
+    alpha        = params.get("alpha", 0.6)
+
+    base = _make_base_buffer(buf_type, capacity, max_capacity, alpha)
+
+    # Se houver bloco "pinned" ativa o wrapper
+    pinned_cfg = buf_cfg.get("pinned", None)
+    if pinned_cfg:
+        pinned_capacity = pinned_cfg.get("capacity", int(0.2 * max_capacity))
+        sample_ratio    = pinned_cfg.get("sample_ratio", 0.2)
+        base = MixedPinnedReplayBuffer(
+            base,
+            pinned_capacity=int(pinned_capacity),
+            sample_ratio_pinned=float(sample_ratio)
+        )
+
+    return base, pinned_cfg
+
 def maybe_grow_buffer(buffer, online_cfg, round_idx, model_cfg):
     """Aumenta a capacidade do buffer growing/growing_prioritized conforme 'grow_schedule' (opcional)."""
     gs = (online_cfg.get("buffer") or {}).get("grow_schedule")
-    if not gs: 
+    if not gs:
         return
+    # Delegamos crescimento: MixedPinnedReplayBuffer possui set_capacity, que delega ao rolante
     if not hasattr(buffer, "set_capacity"):
         return
 
@@ -238,6 +372,127 @@ def apply_regularization_from_config(online_cfg, model_cfg, hp):
         hp.lambda_lwf = params.get("lambda_lwf", _default("lambda_lwf", 0.0))
 
     return reg_type
+
+# -----------------------------
+# Curadoria "high-performance" opcional (controlada por JSON)
+# -----------------------------
+def _rollout_collect(env, agent, device):
+    """Executa um episódio determinístico e retorna uma lista de transições incluindo 'soc' em info."""
+    st = env.reset()
+    done, traj = False, []
+    while not done:
+        a = agent.act(st, deterministic=True)
+        ns, r, done, info = env.step(a)
+        info_ext = dict(info) if isinstance(info, dict) else {}
+        # garante soc presente para estratificação
+        try:
+            info_ext['soc'] = float(env.soc)
+        except Exception:
+            if 'soc' not in info_ext:  # fallback
+                info_ext['soc'] = 0.5
+        traj.append((st, a, r, ns, float(done), info_ext))
+        st = ns
+    return traj
+
+def _stratified_by_soc(pool, k, low_thr=0.1, high_thr=0.9, seed=42):
+    """Amostragem estratificada simples por SoC (low/mid/high). Retorna lista de (s,a,r,ns,d)."""
+    if k <= 0 or len(pool) == 0:
+        return []
+    bins = { "low": [], "mid": [], "high": [] }
+    for (s,a,r,ns,d,info) in pool:
+        soc = float(info.get('soc', 0.5))
+        if soc <= low_thr:   bins["low"].append((s,a,r,ns,d))
+        elif soc >= high_thr: bins["high"].append((s,a,r,ns,d))
+        else:                bins["mid"].append((s,a,r,ns,d))
+    per = max(1, k // 3)
+    out = []
+    rng = np.random.default_rng(seed=seed)
+    for key in ["low", "mid", "high"]:
+        if len(bins[key]) > 0:
+            idx = rng.choice(len(bins[key]), size=min(per, len(bins[key])), replace=False)
+            out.extend([bins[key][i] for i in idx])
+    # completa se faltar
+    flat_pool = [(s,a,r,ns,d) for (s,a,r,ns,d,_) in pool]
+    while len(out) < k and len(flat_pool) > 0:
+        out.append(flat_pool[np.random.randint(0, len(flat_pool))])
+    return out[:k]
+
+def _performance_oriented_pin(replay_buffer, hp, device, online_cfg, trainer, train_days, steps_per_day):
+    """
+    Seleciona amostras para o pinned com foco em alta performance + coverage,
+    apenas se habilitado via JSON.
+    """
+    buf_cfg = online_cfg.get("buffer", {}) or {}
+    pinned_cfg = buf_cfg.get("pinned", {}) or {}
+    enabled = bool(pinned_cfg.get("select_high_performance", False))
+    if not enabled:
+        return False  # não fez curadoria
+
+    promote_k = int(pinned_cfg.get("promote_k", 0))
+    if promote_k <= 0:
+        return False
+
+    hp_ratio = float(pinned_cfg.get("hp_ratio", 0.7))
+    hp_ratio = min(max(hp_ratio, 0.0), 1.0)
+    K_hp  = int(round(promote_k * hp_ratio))
+    K_cov = int(promote_k - K_hp)
+
+    rank_by = str(pinned_cfg.get("rank_by", "reward")).lower()  # "reward" (maior é melhor) ou "cost" (menor é melhor)
+    # thresholds de estratificação por SoC
+    soc_low_thr  = float(pinned_cfg.get("soc_low_thr", 0.1))
+    soc_high_thr = float(pinned_cfg.get("soc_high_thr", 0.9))
+
+    # 1) Coleta determinística nos dias de treino da janela
+    episodes = []
+    for d in train_days:
+        env_eval = EnergyEnvContinuous(
+            data_dir=hp.data_dir, dataset=hp.train_dataset,
+            start_idx=(d-1)*steps_per_day, episode_length=steps_per_day,
+            observations=hp.observations, mode='test'
+        )
+        traj = _rollout_collect(env_eval, trainer.agent, device)
+        ep_return = sum(x[2] for x in traj)
+        ep_cost   = sum(x[5].get('energy_cost', 0.0) for x in traj)
+        episodes.append({"day": d, "traj": traj, "ret": float(ep_return), "cost": float(ep_cost)})
+
+    # 2) Ranqueia episódios
+    if rank_by == "cost":
+        episodes.sort(key=lambda e: e["cost"])  # menor custo é melhor
+    else:
+        episodes.sort(key=lambda e: e["ret"], reverse=True)  # maior retorno é melhor
+
+    # 3) Pool high-performance = top 25% episódios
+    top_q = int(max(1, round(0.25 * len(episodes))))
+    top_eps = episodes[:top_q]
+    hp_pool = []
+    for e in top_eps:
+        hp_pool.extend(e["traj"])
+
+    # 4) Pool global para coverage
+    all_pool = []
+    for e in episodes:
+        all_pool.extend(e["traj"])
+
+    # 5) Amostragem
+    rng = np.random.default_rng(seed=hp.seed if hasattr(hp, "seed") else 42)
+
+    def sample_naive(pool, k):
+        if k <= 0 or len(pool) == 0: 
+            return []
+        idx = rng.choice(len(pool), size=min(k, len(pool)), replace=False)
+        # retorna (s,a,r,ns,d)
+        return [ (pool[i][0], pool[i][1], pool[i][2], pool[i][3], pool[i][4]) for i in idx ]
+
+    hp_batch  = sample_naive(hp_pool, K_hp)
+    cov_batch = _stratified_by_soc(all_pool, K_cov, low_thr=soc_low_thr, high_thr=soc_high_thr, seed=hp.seed if hasattr(hp,"seed") else 42)
+    pin_batch = hp_batch + cov_batch
+
+    # 6) Envia para o pinned
+    if hasattr(replay_buffer, "push"):
+        for (s,a,r,ns,d) in pin_batch:
+            replay_buffer.push(s, a, r, ns, d, pin=True)
+    print(f"[pinned][perf] adicionadas {len(pin_batch)} transições (hp_ratio={hp_ratio:.2f}, rank_by={rank_by}).")
+    return True
 
 # -----------------------------
 # Main
@@ -300,7 +555,7 @@ def main():
             reg_type = apply_regularization_from_config(online_cfg, model_cfg, hp)
 
             # Cria buffer da config e (opcional) ajusta capacidade conforme round
-            replay_buffer = build_buffer_from_config(online_cfg, model_cfg)
+            replay_buffer, pinned_cfg = build_buffer_from_config(online_cfg, model_cfg)
             maybe_grow_buffer(replay_buffer, online_cfg, i, model_cfg)
 
             # Trainer
@@ -320,6 +575,26 @@ def main():
 
             # Treino
             _ = trainer.train()
+
+            # PINNED CURATION:
+            # Se o JSON pedir, fazemos a curadoria por alta performance + coverage.
+            # Senão, mantemos a promoção genérica a partir do rolling.
+            did_perf_curation = False
+            if pinned_cfg:
+                try:
+                    did_perf_curation = _performance_oriented_pin(
+                        replay_buffer, hp, device, online_cfg,
+                        trainer, train_days, steps_per_day
+                    )
+                except Exception as e:
+                    print(f"[pinned][perf] aviso: curadoria falhou ({e}), caindo para promote_from_rolling.")
+                    did_perf_curation = False
+
+                if (not did_perf_curation) and hasattr(replay_buffer, "promote_from_rolling"):
+                    promote_k = int(pinned_cfg.get("promote_k", 0))
+                    if promote_k > 0:
+                        replay_buffer.promote_from_rolling(promote_k)
+                        print(f"[pinned] promovidas {promote_k} amostras da janela para o pinned (fallback).")
 
             # Atualiza buffers de regularização (se métodos existirem)
             if getattr(hp, "lambda_ewc", 0.0) > 0.0 and hasattr(trainer, "compute_fisher_information"):
@@ -365,6 +640,13 @@ def main():
             std_total_cost = float(std_df['energy_cost'].sum())
             std_total_reward = float(std_df['reward'].sum())
 
+            # Info extra de buffer para métricas
+            buf_info = (online_cfg.get("buffer", {}) or {})
+            buf_type_report = buf_info.get("type", "fixed")
+            pinned_info = buf_info.get("pinned", None)
+            pinned_capacity = pinned_info.get("capacity", None) if pinned_info else None
+            pinned_ratio = pinned_info.get("sample_ratio", None) if pinned_info else None
+
             metrics_path = os.path.join(save_dir, f"sac_metrics_day{train_days[0]}.json")
             metrics = {
                 "train_days": train_days,
@@ -382,8 +664,10 @@ def main():
                 "standard_csv": std_csv_path,
                 "standard_total_cost": std_total_cost,
                 "standard_total_reward": std_total_reward,
-                "buffer_type": (online_cfg.get("buffer", {}).get("type", "fixed")),
-                "regularization_type": (online_cfg.get("regularization", {}).get("type", "none"))
+                "buffer_type": buf_type_report,
+                "regularization_type": (online_cfg.get("regularization", {}).get("type", "none")),
+                "pinned_capacity": pinned_capacity,
+                "pinned_sample_ratio": pinned_ratio
             }
             with open(metrics_path, 'w') as f:
                 json.dump(metrics, f, indent=2)
