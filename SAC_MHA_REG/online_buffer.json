@@ -1,0 +1,106 @@
+{
+  "total_days": 30,
+  "train_window": 3,
+  "val_window": 2,
+  "test_days": 30,
+
+  "buffer": {
+    "type": "growing_prioritized",
+    "params": {
+      "max_capacity": 300000,
+      "alpha": 0.8
+    },
+    "grow_schedule": { "mode": "factor", "value": 1.15 }
+  },
+
+  "regularization": { "type": "none" },
+
+  "experiments": [
+    { "exp_type": "SW-GP" },
+
+    { "exp_type": "SW-G",
+      "override": {
+        "buffer": { "type": "growing", "params": { "max_capacity": 300000 } }
+      }
+    },
+
+    { "exp_type": "SW-P",
+      "override": {
+        "buffer": { "type": "prioritized", "params": { "capacity": 200000, "alpha": 0.8 } },
+        "buffer_grow_off": true
+      }
+    },
+
+    { "exp_type": "SW-GP+LwF",
+      "override": {
+        "regularization": {
+          "type": "lwf",
+          "params": { "lambda_lwf": 0.1 }
+        }
+      }
+    },
+
+    { "exp_type": "SW-GP+EWC",
+      "override": {
+        "regularization": {
+          "type": "ewc",
+          "params": { "lambda_ewc": 0.0001 }
+        }
+      }
+    },
+
+    { "exp_type": "SW-GP+All-light",
+      "override": {
+        "regularization": {
+          "type": "all",
+          "params": {
+            "lambda_lwf": 0.1,
+            "lambda_ewc": 0.0001,
+            "lambda_si": 0.00001,
+            "lambda_mas": 0.00001
+          }
+        }
+      }
+    },
+
+    { "exp_type": "SW-GP-PinnedBest",
+      "override": {
+        "buffer": {
+          "type": "growing_prioritized",
+          "params": {
+            "max_capacity": 300000,
+            "alpha": 0.8
+          },
+          "pinned": {
+            "capacity": 60000,
+            "sample_ratio": 0.25,
+            "promote_k": 2000,
+            "promote_best_only": true
+          }
+        }
+      }
+    },
+
+    { "exp_type": "SW-GP+LwF-PinnedBest",
+      "override": {
+        "regularization": {
+          "type": "lwf",
+          "params": { "lambda_lwf": 0.1 }
+        },
+        "buffer": {
+          "type": "growing_prioritized",
+          "params": {
+            "max_capacity": 300000,
+            "alpha": 0.8
+          },
+          "pinned": {
+            "capacity": 60000,
+            "sample_ratio": 0.25,
+            "promote_k": 2000,
+            "promote_best_only": true
+          }
+        }
+      }
+    }
+  ]
+}

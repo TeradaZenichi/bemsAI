@@ -53,7 +53,7 @@ class SharedEncoder(nn.Module):
             dropout=dropout,
             activation="gelu",
             batch_first=True,
-            norm_first=False,  # aviso nested_tensor é inofensivo; pode mudar p/ False se quiser silenciar
+            norm_first=False,  # silencia o aviso do nested_tensor
         )
         self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
 
@@ -69,7 +69,7 @@ class SharedEncoder(nn.Module):
         x_seq: [B,T,Dobs] float32
         return: h [B,d_model]
         """
-        x = self.in_proj(x_seq.to(self.device))  # [B,T,d]
+        x = self.in_proj(x_seq.to(self.device, dtype=torch.float32))  # [B,T,d]
         if self.pooling == "cls":
             B = x.size(0)
             cls_tok = self.cls.expand(B, -1, -1)
@@ -111,8 +111,8 @@ class ActorModule(nn.Module):
         self.actor_head = actor_head
         self.action_scale = action_scale
         self.action_bias = action_bias
-        self.log_std_min = log_std_min
-        self.log_std_max = log_std_max
+        self.log_std_min = float(log_std_min)
+        self.log_std_max = float(log_std_max)
         self.device = device
 
     def _as_seq_batch(self, seq_tensor: torch.Tensor) -> torch.Tensor:
@@ -127,40 +127,55 @@ class ActorModule(nn.Module):
 
     def forward(self, x_seq):
         """
-        Retorna (mu, std) dado x_seq [B,T,D]
+        Retorna (mu, std) dado x_seq [B,T,D] em FP32 + guardas.
         """
-        x_seq = self._as_seq_batch(x_seq)
-        h = self.encoder(x_seq)               # [B,d]
-        mu_logstd = self.actor_head(h)        # [B, 2*act_dim]
-        mu, log_std = mu_logstd.chunk(2, dim=-1)
-        log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
-        std = torch.exp(log_std)
-        return mu, std
+        # força fp32 (desliga autocast) para estabilidade
+        with torch.amp.autocast('cuda', enabled=False):
+            x_seq = self._as_seq_batch(x_seq)
+            h = self.encoder(x_seq)               # [B,d]
+            mu_logstd = self.actor_head(h)        # [B, 2*act_dim]
+            mu, log_std = mu_logstd.chunk(2, dim=-1)
+            log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
+            std = torch.exp(log_std).clamp_min(1e-6)
+
+            # guardas contra NaN/Inf
+            if not torch.isfinite(mu).all():
+                mu = torch.nan_to_num(mu, nan=0.0, posinf=1.0, neginf=-1.0)
+            if not torch.isfinite(std).all():
+                std = torch.nan_to_num(std, nan=1.0, posinf=1.0, neginf=1.0)
+
+            return mu, std
 
     def sample(self, x_seq):
         """
         Reparametrização Gaussiana + correção do tanh no log_prob.
         Retorna (action, log_prob, mu_action).
         """
-        x_seq = self._as_seq_batch(x_seq)
-        mu, std = self.forward(x_seq)
-        dist = torch.distributions.Normal(mu, std)
+        with torch.amp.autocast('cuda', enabled=False):  # fp32
+            x_seq = self._as_seq_batch(x_seq)
+            mu, std = self.forward(x_seq)  # já vem em fp32 e estável
+            dist = torch.distributions.Normal(mu, std)
 
-        # reparametrização
-        eps = torch.randn_like(mu)
-        pre_tanh = mu + std * eps
-        y_t = torch.tanh(pre_tanh)
+            # reparametrização
+            eps = torch.randn_like(mu)
+            pre_tanh = mu + std * eps
+            y_t = torch.tanh(pre_tanh)
 
-        # ação escalada (escala/bias NÃO entram no log_prob)
-        action = y_t * self.action_scale + self.action_bias
+            # ação escalada (escala/bias NÃO entram no log_prob)
+            action = y_t * self.action_scale + self.action_bias
 
-        # log π(a|s): soma nas dimensões de ação
-        log_prob = dist.log_prob(pre_tanh).sum(dim=-1, keepdim=True)
-        # correção do tanh
-        log_prob -= torch.log(1.0 - y_t.pow(2) + 1e-6).sum(dim=-1, keepdim=True)
+            # log π(a|s): soma nas dimensões de ação
+            normal_log_prob = dist.log_prob(pre_tanh).sum(dim=-1, keepdim=True)
+            # correção do tanh
+            correction = torch.log(1.0 - y_t.pow(2) + 1e-6).sum(dim=-1, keepdim=True)
+            log_prob = normal_log_prob - correction
 
-        mu_action = torch.tanh(mu) * self.action_scale + self.action_bias
-        return action, log_prob, mu_action
+            mu_action = torch.tanh(mu) * self.action_scale + self.action_bias
+
+            if not torch.isfinite(log_prob).all():
+                log_prob = torch.nan_to_num(log_prob, nan=0.0, posinf=0.0, neginf=0.0)
+
+            return action, log_prob, mu_action
 
 # ---------------------------
 # SAC Agent com encoder único
@@ -189,7 +204,7 @@ class SACAgent(nn.Module):
         dropout: float = 0.1,
         pooling: str = "mean",
         device: str = "cpu",
-        log_std_min: int = -20,
+        log_std_min: int = -5,
         log_std_max: int = 2,
     ):
         super().__init__()
@@ -345,7 +360,7 @@ if __name__ == "__main__":
         n_layers=ap.get("n_layers", 1),
         dropout=ap.get("dropout", 0.1),
         device=device,
-        log_std_min=ap.get("log_std_min", -20),
+        log_std_min=ap.get("log_std_min", -5),  # default mais estável
         log_std_max=ap.get("log_std_max", 2),
     )
 

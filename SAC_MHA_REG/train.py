@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from torch.nn.utils import clip_grad_norm_  # <<< NEW
 from tqdm import trange
 import matplotlib.pyplot as plt
 from collections import deque
@@ -142,7 +143,7 @@ class SACHyperParameters:
         self.batch_size   = ap.get("batch_size", 256)
         self.gamma        = ap.get("gamma", 0.99)
         self.tau          = ap.get("tau", 0.005)
-        self.log_std_min  = ap.get("log_std_min", -20)
+        self.log_std_min  = ap.get("log_std_min", -5)   # <<< default mais estável
         self.log_std_max  = ap.get("log_std_max", 2)
         self.act_dim      = ap.get("act_dim", 1)
         self.device       = self.training.get("device", "cpu")
@@ -339,10 +340,8 @@ class SACTrainer:
                 q1, q2 = self.agent.qnet(states, new_action)
                 q_min = torch.min(q1, q2)
             policy_loss = (self.log_alpha.exp() * log_prob - q_min).mean()
-            # zera só o que existir
-            if hasattr(self.agent, "actor"):
-                if hasattr(self.agent.actor, "zero_grad"):
-                    self.agent.actor.zero_grad(set_to_none=True)
+            if hasattr(self.agent, "actor") and hasattr(self.agent.actor, "zero_grad"):
+                self.agent.actor.zero_grad(set_to_none=True)
             policy_loss.backward(retain_graph=False)
             for n, p in self.agent.named_parameters():
                 if p.grad is None or n not in omega:
@@ -435,6 +434,16 @@ class SACTrainer:
                 # next seq
                 seqw.push(obs_next)
                 next_seq = seqw.current_seq()
+
+                # --- SANITIZAÇÃO antes de gravar no replay ---  <<< NEW
+                def _finite_np(x): 
+                    x = np.asarray(x)
+                    return np.all(np.isfinite(x))
+                if not (_finite_np(obs_seq) and _finite_np(next_seq) and np.isfinite(reward) and _finite_np(action)):
+                    obs_seq  = np.nan_to_num(obs_seq,  nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+                    next_seq = np.nan_to_num(next_seq, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+                    action   = np.nan_to_num(action,   nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+                    reward   = float(reward) if np.isfinite(reward) else 0.0
 
                 # guarda sequência no buffer
                 self.buffer.push(obs_seq, action, reward, next_seq, done)
@@ -557,9 +566,12 @@ class SACTrainer:
         actor_head_params = list(self.agent.actor_head.parameters())
         critic_head_params = list(self.agent.q1_head.parameters()) + list(self.agent.q2_head.parameters())
 
+        # <<< NEW: LR menor no encoder p/ estabilidade
+        enc_lr = min(self.hp.critic_lr, 1e-4)
+
         self.optimizer_critic = torch.optim.AdamW(
             [
-                {"params": enc_params, "lr": self.hp.critic_lr, "weight_decay": wd_encoder},
+                {"params": enc_params, "lr": enc_lr, "weight_decay": wd_encoder},
                 {"params": critic_head_params, "lr": self.hp.critic_lr, "weight_decay": 0.0},
             ],
             betas=(0.9, 0.999)
@@ -588,31 +600,44 @@ class SACTrainer:
         reward     = torch.tensor(reward, dtype=torch.float32, device=device).unsqueeze(-1) if reward.ndim == 1 else torch.tensor(reward, dtype=torch.float32, device=device)
         done       = torch.tensor(done, dtype=torch.float32, device=device).unsqueeze(-1) if done.ndim == 1 else torch.tensor(done, dtype=torch.float32, device=device)
 
+        # Debug opcional de sanidade do batch
+        if not torch.isfinite(state).all() or not torch.isfinite(next_state).all() or not torch.isfinite(action).all():
+            print("[WARN] Batch contém NaN/Inf em state/next_state/action")
+
         self._init_optimizers_if_needed()
 
         scaler = self._amp_scaler
-        use_amp = scaler is not None and torch.cuda.is_available()
-        amp_ctx = torch.amp.autocast('cuda', dtype=torch.float16) if use_amp else contextlib.nullcontext()
+        # <<< NEW: use bf16 se disponível; caso contrário, desliga AMP (evita fp16 instável)
+        amp_dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else None
+        use_amp = scaler is not None and (amp_dtype is not None)
+        amp_ctx = torch.amp.autocast('cuda', dtype=amp_dtype) if use_amp else contextlib.nullcontext()
 
         # --- 1) Critic target ---
         with amp_ctx, torch.no_grad():
-            next_action, next_log_prob, _ = self._actor_sample(self.agent, next_state)  # <<< FIX
+            next_action, next_log_prob, _ = self._actor_sample(self.agent, next_state)  # ator já roda fp32 internamente
             target_q1, target_q2 = self.target.qnet(next_state, next_action)
             target_q = torch.min(target_q1, target_q2) - self.log_alpha.exp() * next_log_prob
             target_q = reward + (1 - done) * self.hp.gamma * target_q
+            # <<< NEW: clamp nos alvos para evitar blow-up
+            target_q = target_q.clamp(-1e3, 1e3)
 
         # --- 2) Critic update (treina encoder + Q-heads) ---
         with amp_ctx:
             current_q1, current_q2 = self.agent.qnet(state, action)
-            critic_loss = torch.nn.functional.mse_loss(current_q1, target_q) + \
-                          torch.nn.functional.mse_loss(current_q2, target_q)
+            # <<< NEW: Huber loss (mais robusto)
+            critic_loss = F.smooth_l1_loss(current_q1, target_q) + F.smooth_l1_loss(current_q2, target_q)
 
         self.optimizer_critic.zero_grad(set_to_none=True)
         if use_amp:
             scaler.scale(critic_loss).backward()
+            scaler.unscale_(self.optimizer_critic)                              # <<< NEW
+            # clipping separado: encoder e heads
+            clip_grad_norm_(self.agent.encoder.parameters(), max_norm=1.0)      # <<< NEW
+            clip_grad_norm_(list(self.agent.q1_head.parameters()) + list(self.agent.q2_head.parameters()), max_norm=1.0)  # <<< NEW
             scaler.step(self.optimizer_critic)
         else:
             critic_loss.backward()
+            clip_grad_norm_(self.agent.parameters(), max_norm=1.0)              # <<< NEW
             self.optimizer_critic.step()
 
         # --- 3) Policy + Alpha com delay ---
@@ -624,7 +649,7 @@ class SACTrainer:
                 p.requires_grad_(False)
 
             with amp_ctx:
-                new_action, log_prob, _ = self._actor_sample(self.agent, state)  # <<< FIX
+                new_action, log_prob, _ = self._actor_sample(self.agent, state)  # ator fp32 internamente
                 q1_new, q2_new = self.agent.qnet(state, new_action)
                 q_new = torch.min(q1_new, q2_new)
                 base_actor_loss = (self.log_alpha.exp() * log_prob - q_new).mean()
@@ -643,9 +668,12 @@ class SACTrainer:
             self.optimizer_actor.zero_grad(set_to_none=True)
             if use_amp:
                 scaler.scale(actor_loss).backward()
+                scaler.unscale_(self.optimizer_actor)                           # <<< NEW
+                clip_grad_norm_(self.agent.actor_head.parameters(), max_norm=1.0)  # <<< NEW
                 scaler.step(self.optimizer_actor)
             else:
                 actor_loss.backward()
+                clip_grad_norm_(self.agent.actor_head.parameters(), max_norm=1.0)  # <<< NEW
                 self.optimizer_actor.step()
 
             # Alpha
@@ -658,6 +686,10 @@ class SACTrainer:
             else:
                 alpha_loss.backward()
                 self.alpha_optimizer.step()
+
+            # <<< NEW: clamp em log_alpha (evita α extremo)
+            with torch.no_grad():
+                self.log_alpha.data.clamp_(min=-16.0, max=2.0)
 
             # descongela encoder
             for p in self.agent.encoder.parameters():
